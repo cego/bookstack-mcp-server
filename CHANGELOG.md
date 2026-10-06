@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0](https://github.com/cego/bookstack-mcp-server/compare/v2.1.0...v3.0.0) (2026-10-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* migrate to Bun, fix upload/auth/logging defects, add live test suite
+
+### Added
+
+* **http:** per-user OAuth resource server mode ([12733e3](https://github.com/cego/bookstack-mcp-server/commit/12733e3fd3da513e8a017ca5fc2d11b9caaf938d))
+* **http:** per-user OAuth resource server mode ([8520130](https://github.com/cego/bookstack-mcp-server/commit/8520130970ac8e539b4c7cf106f84d72fd2a30a4))
+* migrate to Bun, fix upload/auth/logging defects, add live test suite ([4476d87](https://github.com/cego/bookstack-mcp-server/commit/4476d8786e8e5b71085cea644b051d3d966bf0f3))
+* **pages:** partial page editing without resending whole pages ([402782f](https://github.com/cego/bookstack-mcp-server/commit/402782f9aa6643e4cfbb88e4bad84457ab0b5248))
+* **pages:** partial page editing without resending whole pages ([#22](https://github.com/cego/bookstack-mcp-server/issues/22)) ([040957e](https://github.com/cego/bookstack-mcp-server/commit/040957e7a90a31abb9ac7a7acee9641be7009571))
+* **release:** automate versioning and publishing with release-please + OIDC ([a4a3ca3](https://github.com/cego/bookstack-mcp-server/commit/a4a3ca3ee26f70f6d64b3fb55319ac639368b422))
+
+
+### Fixed
+
+* **pages:** harden partial-edit safety ([48e7eb6](https://github.com/cego/bookstack-mcp-server/commit/48e7eb6c985fb83a71b76bacae48ad1644e47732))
+* **pages:** retain chained edit verification ([89e87e3](https://github.com/cego/bookstack-mcp-server/commit/89e87e3c16e02b1e690edd2ad9a9adb54691ca6f))
+* **pages:** verify final partial edit state ([545bbf6](https://github.com/cego/bookstack-mcp-server/commit/545bbf6df35aba0559ab1a04eeedc15e94cbb104))
+* **pages:** verify transformed partial edits ([b51e925](https://github.com/cego/bookstack-mcp-server/commit/b51e92515a807be57a5e9d9ae673c3e82463cdc0))
+* **release:** stop failing the workflow on a direct push to main ([6afe258](https://github.com/cego/bookstack-mcp-server/commit/6afe2580f715562ac141e9f67b7cc856fb8db617))
+
+
+### Build & tooling
+
+* **image:** build, smoke and push the Docker image on v* tags ([1bf7547](https://github.com/cego/bookstack-mcp-server/commit/1bf754794b7bfa831760e34438bfbbc342525dc3))
+* **image:** version images as &lt;version&gt;-r&lt;revision&gt; ([56ab196](https://github.com/cego/bookstack-mcp-server/commit/56ab1967e8c673da3cadb4452d3aa1171a29648a))
+
 ## [2.1.0](https://github.com/pnocera/bookstack-mcp-server/compare/v2.0.0...v2.1.0) (2026-08-22)
 
 
