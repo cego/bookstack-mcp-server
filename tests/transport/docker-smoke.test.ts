@@ -21,6 +21,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
+import pkg from '../../package.json' with { type: 'json' };
 
 const SMOKE_ENABLED = ['1', 'true'].includes(process.env.RUN_DOCKER_SMOKE ?? '');
 /** Tag CI builds. Overridable so the suite can smoke any locally built image. */
@@ -209,7 +210,12 @@ describe.skipIf(!SMOKE_ENABLED)('built image', () => {
       const response = await fetch(`${url}/`);
 
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ status: 'running', mcp: true });
+      // DOCKER_SMOKE_VERSION is the release version baked in by the image workflow.
+      expect(await response.json()).toMatchObject({
+        status: 'running',
+        mcp: true,
+        version: process.env.DOCKER_SMOKE_VERSION ?? pkg.version,
+      });
     },
     STARTUP_TIMEOUT_MS + 15_000
   );
@@ -275,6 +281,42 @@ describe.skipIf(!SMOKE_ENABLED)('built image', () => {
       expect(byName.get('resources_loaded')).toBe(true);
     },
     STARTUP_TIMEOUT_MS + 30_000
+  );
+
+  it(
+    'starts in OAuth mode and challenges with its resource metadata',
+    async () => {
+      const { url } = await startContainer({
+        BOOKSTACK_BASE_URL: UNREACHABLE_BOOKSTACK,
+        MCP_AUTH_MODE: 'oauth',
+        MCP_OAUTH_ISSUER: 'https://idp.invalid/smoke',
+        MCP_OAUTH_RESOURCE: 'https://bookstack-mcp.invalid/message',
+        MCP_OAUTH_CLIENT_ID: 'bookstack-mcp-server',
+        MCP_OAUTH_CLIENT_SECRET: 'docker-smoke-client-secret',
+        BOOKSTACK_OAUTH_AUDIENCE: 'bookstack-api',
+      });
+
+      const metadata = await fetch(`${url}/.well-known/oauth-protected-resource/message`);
+      expect(metadata.status).toBe(200);
+      expect(await metadata.json()).toMatchObject({
+        resource: 'https://bookstack-mcp.invalid/message',
+        authorization_servers: ['https://idp.invalid/smoke'],
+      });
+
+      const anonymous = await fetch(`${url}/message`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get('www-authenticate')).toContain(
+        'resource_metadata="https://bookstack-mcp.invalid/.well-known/oauth-protected-resource/message"'
+      );
+    },
+    STARTUP_TIMEOUT_MS + 15_000
   );
 
   it(

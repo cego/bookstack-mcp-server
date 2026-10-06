@@ -191,9 +191,10 @@ const SECRET_KEY_PATTERN =
  *    canonicalBaseUrl()'s, which name the setting and the offending COMPONENT and
  *    interpolate nothing at all. Without this the operator is told only
  *    "[redacted: N chars]" at exactly the moment they need to know which variable is wrong.
+ *  - `oauth_error` - src/auth/middleware.ts; an RFC 6749 code mapped onto a frozen list (else 'other').
  */
 const SAFE_STRING_KEY_PATTERN =
-  /^(method|url|base_origin|base_path|base_path_digest|type|content_type|format|encoding|mimeType|mime_type|source|sort|fileField|schema|issue_codes|config_errors)$/i;
+  /^(method|url|base_origin|base_path|base_path_digest|type|content_type|format|encoding|mimeType|mime_type|source|sort|fileField|schema|issue_codes|config_errors|oauth_error)$/i;
 
 /**
  * Keys whose value is a NAME this server is claimed to have defined - and which is checked

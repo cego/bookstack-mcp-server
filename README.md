@@ -89,9 +89,14 @@ export MCP_TRANSPORT="http"
 | Variable | Default | Description |
 | --- | --- | --- |
 | `MCP_TRANSPORT` | `http` | Transport mode. Only the exact value `stdio` selects stdio; **any other value (or unset) starts the HTTP server**. |
-| `MCP_AUTH_TOKEN` | _(none — **required** for HTTP)_ | **Inbound** secret callers must present as `Authorization: Bearer <value>` on `POST /message`. The HTTP transport **refuses to start** without it — there is no "no auth" mode. Unrelated to `BOOKSTACK_API_TOKEN`, and must not be the same value. Ignored in stdio mode. Generate with `openssl rand -hex 32`. |
+| `MCP_AUTH_TOKEN` | _(none — **required** for HTTP, unless `MCP_AUTH_MODE=oauth`)_ | **Inbound** secret callers must present as `Authorization: Bearer <value>` on `POST /message`. The HTTP transport **refuses to start** without it — there is no "no auth" mode. Unrelated to `BOOKSTACK_API_TOKEN`, and must not be the same value. Ignored in stdio mode. Generate with `openssl rand -hex 32`. |
+| `MCP_AUTH_MODE` | `token` | `token` uses `MCP_AUTH_TOKEN`; `oauth` makes the HTTP transport an OAuth resource server that calls BookStack as each user. See [Per-user OAuth](#per-user-oauth). |
+| `MCP_OAUTH_ISSUER` | _(required with `oauth`)_ | OIDC issuer the access tokens come from (its exact `iss` value). |
+| `MCP_OAUTH_RESOURCE` | _(required with `oauth`)_ | This server's public `/message` URL. Access tokens must carry it in `aud`. |
+| `MCP_OAUTH_CLIENT_ID` / `MCP_OAUTH_CLIENT_SECRET` | _(required with `oauth`)_ | Confidential client only this server holds, used for token exchange. Not the client MCP clients sign in with. |
+| `BOOKSTACK_OAUTH_AUDIENCE` | _(required with `oauth`)_ | Audience BookStack requires on access tokens (its `OIDC_API_AUDIENCE`). |
 | `BOOKSTACK_BASE_URL` | `http://localhost:8080/api` | Full URL to the BookStack API. Must be a valid URL and include the `/api` suffix. |
-| `BOOKSTACK_API_TOKEN` | _(none — required)_ | **Outbound** BookStack API token as `token_id:token_secret`. This is the credential the server spends on every tool call. Startup fails if unset. |
+| `BOOKSTACK_API_TOKEN` | _(none — required, unless `MCP_AUTH_MODE=oauth`)_ | **Outbound** BookStack API token as `token_id:token_secret`. This is the credential the server spends on every tool call. Startup fails if unset. |
 | `BOOKSTACK_TIMEOUT` | `30000` | BookStack request timeout in milliseconds. |
 | `SERVER_PORT` | `3000` | Port the HTTP transport listens on. Ignored in stdio mode. |
 | `HTTP_BODY_LIMIT` | `73400320` (70 MiB) | Maximum accepted `POST /message` body, in bytes. Sized for the largest inline base64 upload the image/attachment tools advertise (50,000 KB). Express's own default is ~100 KB, which would reject real uploads with a `413`. Lower it if untrusted callers can reach the port. |
@@ -122,8 +127,9 @@ The transport is chosen at startup from `MCP_TRANSPORT`:
 
 ### HTTP endpoints
 
-When running in HTTP mode the server exposes exactly three endpoints. Any other
-path returns a JSON `404` listing the valid ones.
+When running in HTTP mode the server exposes three endpoints, plus the OAuth metadata
+document in [OAuth mode](#per-user-oauth). Any other path returns a JSON `404` listing
+the valid ones.
 
 | Method & path | Purpose | Status codes |
 | --- | --- | --- |
@@ -210,7 +216,47 @@ curl -X POST http://localhost:3000/message \
 
 Per-request credential overrides are supported on `POST /message` via the
 `x-bookstack-url` and `x-bookstack-token` headers; both fall back to the
-`BOOKSTACK_BASE_URL` / `BOOKSTACK_API_TOKEN` environment variables.
+`BOOKSTACK_BASE_URL` / `BOOKSTACK_API_TOKEN` environment variables. OAuth mode refuses them.
+
+### Per-user OAuth
+
+With `MCP_AUTH_MODE=oauth` the HTTP transport follows the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization):
+each person signs in with your OIDC provider, and BookStack sees their own account,
+permissions and audit trail instead of one shared API token.
+
+1. A request without a token gets `401` with
+   `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/message"`,
+   which points the client at `MCP_OAUTH_ISSUER`.
+2. Each access token is checked against the issuer's published keys (RS256), plus `iss`, `exp`, `sub`, and
+   an `aud` containing `MCP_OAUTH_RESOURCE`.
+3. The server exchanges it (RFC 8693) as `MCP_OAUTH_CLIENT_ID` for a token with
+   `aud=BOOKSTACK_OAUTH_AUDIENCE`, cached until shortly before it expires, and calls
+   BookStack with that. **The caller's token is never forwarded.**
+
+Requirements:
+
+- BookStack accepts OIDC access tokens on its API (`OIDC_API_ACCESS_TOKENS=true`, from
+  [BookStack PR 6237](https://codeberg.org/bookstack/bookstack/pulls/6237)), with
+  `OIDC_API_ALLOWED_CLIENTS` set to `MCP_OAUTH_CLIENT_ID`. Users must have logged in to
+  BookStack once.
+- Two OAuth clients. The one MCP clients sign in with issues access tokens whose `aud`
+  contains `MCP_OAUTH_RESOURCE` and `MCP_OAUTH_CLIENT_ID`, but **not** BookStack's audience,
+  so those tokens are useless against BookStack directly. Most providers ignore RFC 8707's
+  `resource` parameter, so configure that audience as a fixed one. `MCP_OAUTH_CLIENT_ID` is
+  a separate confidential client, held only by this server, that may exchange those tokens
+  for `BOOKSTACK_OAUTH_AUDIENCE`.
+- `MCP_AUTH_TOKEN`, `BOOKSTACK_API_TOKEN` and `BOOKSTACK_UPLOAD_ROOT` are unset; the server
+  refuses to start otherwise (an upload root would be readable by every user).
+
+`GET /health` then checks issuer discovery and that BookStack answers, since there is
+no service token to call it with. Connect Claude Code with the sign-in client, using the
+callback port registered for it:
+
+```bash
+claude mcp add --transport http --client-id <sign-in client id> --client-secret \
+  --callback-port <port> bookstack https://bookstack-mcp.example.com/message
+```
 
 ### Using with n8n
 

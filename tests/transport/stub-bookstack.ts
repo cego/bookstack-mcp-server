@@ -43,6 +43,8 @@ export interface BookStackStub {
   apiToken: string;
   /** Requests seen so far, oldest first. */
   readonly requests: RecordedRequest[];
+  /** Bearer tokens the stub also accepts, as BookStack does with OIDC access tokens. */
+  readonly acceptedBearerTokens: Set<string>;
   stop(): Promise<void>;
 }
 
@@ -107,6 +109,7 @@ function apiError(code: number, message: string): Response {
  */
 export function startBookStackStub(): BookStackStub {
   const requests: RecordedRequest[] = [];
+  const acceptedBearerTokens = new Set<string>();
 
   // Untyped binding on purpose: `Bun.serve`'s return type is generic in its WebSocket
   // data, and annotating it as a bare `Server` fails to compile.
@@ -129,7 +132,9 @@ export function startBookStackStub(): BookStackStub {
       // The client sends `Authorization: Token <id>:<secret>`. Checking it here is what
       // makes a tool call prove the outbound credential was actually attached: without
       // this the stub would answer a request that forgot to authenticate.
-      if (authorization !== `Token ${STUB_API_TOKEN}`) {
+      const bearer = authorization?.match(/^Bearer (\S+)$/)?.[1];
+      const bearerAccepted = bearer !== undefined && acceptedBearerTokens.has(bearer);
+      if (authorization !== `Token ${STUB_API_TOKEN}` && !bearerAccepted) {
         return apiError(401, 'Unauthorized');
       }
 
@@ -160,6 +165,7 @@ export function startBookStackStub(): BookStackStub {
     baseUrl: `http://127.0.0.1:${server.port}/api`,
     apiToken: STUB_API_TOKEN,
     requests,
+    acceptedBearerTokens,
     async stop(): Promise<void> {
       await server.stop(true);
     },

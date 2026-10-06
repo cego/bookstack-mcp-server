@@ -346,6 +346,17 @@ describe('HTTP transport startup', () => {
     ).toThrow(/MCP_AUTH_TOKEN is not set/);
   });
 
+  it('fails closed when BOOKSTACK_API_TOKEN is unset', () => {
+    const withoutToken = { ...config, bookstack: { ...config.bookstack, apiToken: undefined } };
+
+    expect(() =>
+      createHttpApp({
+        config: withoutToken,
+        http: { bodyLimitBytes: DEFAULT_HTTP_BODY_LIMIT_BYTES, authToken: TEST_AUTH_TOKEN },
+      })
+    ).toThrow(/BOOKSTACK_API_TOKEN/);
+  });
+
   it('starts once MCP_AUTH_TOKEN is present', async () => {
     const { url } = await startApp({
       bodyLimitBytes: DEFAULT_HTTP_BODY_LIMIT_BYTES,
