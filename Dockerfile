@@ -30,6 +30,9 @@ RUN bun install --production --frozen-lockfile
 FROM ${BUN_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Set by the image workflow from the release tag; empty falls back to package.json's version.
+ARG SERVER_VERSION=""
+ENV SERVER_VERSION=${SERVER_VERSION}
 
 # Bring in the resolved production dependencies.
 COPY --from=deps /app/node_modules ./node_modules

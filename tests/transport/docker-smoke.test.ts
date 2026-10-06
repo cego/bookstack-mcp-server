@@ -21,6 +21,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
+import pkg from '../../package.json' with { type: 'json' };
 
 const SMOKE_ENABLED = ['1', 'true'].includes(process.env.RUN_DOCKER_SMOKE ?? '');
 /** Tag CI builds. Overridable so the suite can smoke any locally built image. */
@@ -209,7 +210,12 @@ describe.skipIf(!SMOKE_ENABLED)('built image', () => {
       const response = await fetch(`${url}/`);
 
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ status: 'running', mcp: true });
+      // DOCKER_SMOKE_VERSION is the release version baked in by the image workflow.
+      expect(await response.json()).toMatchObject({
+        status: 'running',
+        mcp: true,
+        version: process.env.DOCKER_SMOKE_VERSION ?? pkg.version,
+      });
     },
     STARTUP_TIMEOUT_MS + 15_000
   );

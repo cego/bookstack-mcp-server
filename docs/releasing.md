@@ -375,17 +375,27 @@ npm pack --dry-run   # exactly what a release would contain
 
 ## Docker image
 
-Pushing a `v*` tag runs `.github/workflows/image.yml`. It checks that the tag equals
-`v` + `package.json#version`, builds the image, runs the image smoke suite against it,
-and only then pushes `ghcr.io/<owner>/bookstack-mcp-server:<version>` and `:<major>.<minor>`
-(plus `latest` for a non-prerelease), with provenance and an SBOM.
+Images are versioned `<version>-r<revision>`: `<version>` is `package.json#version`, and
+`<revision>` counts releases of that version, so a change made here without a new
+`package.json` version still gets a new image. Start each version at `r1`.
 
-Tags that release-please creates with `GITHUB_TOKEN` do not trigger other workflows.
-Build those by running the workflow on the tag; it refuses any ref that is not a `v*` tag:
+Pushing a tag like `v2.1.0-r1` runs `.github/workflows/image.yml`, which:
+
+1. refuses a tag whose `<version>` is not `package.json#version`;
+2. builds the image with `SERVER_VERSION=2.1.0-r1`, so `GET /` and MCP `initialize` report it;
+3. runs the image smoke suite against it;
+4. only then pushes `ghcr.io/<owner>/bookstack-mcp-server:2.1.0-r1`, with provenance and
+   an SBOM. No `latest` or moving tags: deploy by digest.
 
 ```bash
-gh workflow run image.yml --ref v2.2.0
+git tag v2.1.0-r1 <commit> && git push origin v2.1.0-r1
+gh workflow run image.yml --ref v2.1.0-r1   # rebuild an existing tag
 ```
+
+Plain `vX.Y.Z` tags, including the ones release-please creates, build no image. To
+follow these tags with Renovate, use regex versioning such as
+`regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-r(?<build>\d+)$`; its default
+Docker versioning reads `-r1` and `-r2` as different variants and never upgrades between them.
 
 ---
 
