@@ -59,9 +59,8 @@ const baseUrlCheck = (value: string, ctx: z.RefinementCtx): void => {
 export const ConfigSchema = z.object({
   bookstack: z.object({
     baseUrl: z.string().superRefine(baseUrlCheck).default('http://localhost:8080/api'),
-    apiToken: z
-      .string()
-      .min(1, 'BookStack API token is required - set BOOKSTACK_API_TOKEN environment variable'),
+    // Optional here because OAuth mode authenticates per user; BookStackClient requires it otherwise.
+    apiToken: z.string().min(1).optional(),
     timeout: z.number().positive().default(30000),
   }),
   server: z.object({
@@ -119,6 +118,74 @@ export type Config = z.infer<typeof ConfigSchema>;
  */
 export const DEFAULT_HTTP_BODY_LIMIT_BYTES = 70 * 1024 * 1024; // 73,400,320
 
+/** Hosts on which plain http is acceptable for OAuth endpoints (local development). */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** Whether an OAuth URL travels over TLS, or stays on loopback. */
+export function usesSecureTransport(url: URL): boolean {
+  return (
+    url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname))
+  );
+}
+
+/** An OAuth URL setting: https (or loopback http), with no credentials, query or fragment. */
+function oauthUrl(name: string) {
+  return z
+    .string({ error: `${name} is required when MCP_AUTH_MODE=oauth` })
+    .superRefine((value, ctx) => {
+      let url: URL;
+      try {
+        url = new URL(value);
+      } catch {
+        ctx.addIssue({ code: 'custom', message: `${name} must be an absolute URL` });
+        return;
+      }
+      if (!usesSecureTransport(url)) {
+        ctx.addIssue({ code: 'custom', message: `${name} must use https (http only on loopback)` });
+      }
+      if (url.username || url.password || url.search || url.hash) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `${name} must not carry credentials, a query string or a fragment`,
+        });
+      }
+    });
+}
+
+/** A required non-empty OAuth string setting. */
+function oauthString(name: string) {
+  return z
+    .string({ error: `${name} is required when MCP_AUTH_MODE=oauth` })
+    .min(1, `${name} is required when MCP_AUTH_MODE=oauth`);
+}
+
+/**
+ * OAuth resource-server settings, used when MCP_AUTH_MODE=oauth.
+ *
+ * Inbound tokens must be issued by `issuer` with `resource` in their audience; each one is
+ * exchanged (RFC 8693) as `clientId` for a token with `bookstackAudience`, which is what
+ * BookStack receives. The inbound token itself is never forwarded.
+ */
+export const OAuthConfigSchema = z
+  .object({
+    issuer: oauthUrl('MCP_OAUTH_ISSUER'),
+    resource: oauthUrl('MCP_OAUTH_RESOURCE'),
+    clientId: oauthString('MCP_OAUTH_CLIENT_ID'),
+    clientSecret: oauthString('MCP_OAUTH_CLIENT_SECRET'),
+    bookstackAudience: oauthString('BOOKSTACK_OAUTH_AUDIENCE'),
+  })
+  .refine((oauth) => oauth.resource.replace(/\/$/, '') !== oauth.clientId.replace(/\/$/, ''), {
+    path: ['resource'],
+    message:
+      'MCP_OAUTH_RESOURCE must differ from MCP_OAUTH_CLIENT_ID, or ID tokens pass as access tokens',
+  });
+
+export type OAuthConfig = z.infer<typeof OAuthConfigSchema>;
+
+const AuthModeSchema = z
+  .enum(['token', 'oauth'], { error: "MCP_AUTH_MODE must be 'token' or 'oauth'" })
+  .default('token');
+
 /**
  * Settings that exist only for the HTTP transport.
  *
@@ -146,6 +213,7 @@ export const HttpTransportConfigSchema = z.object({
    * outbound credential this server spends on the caller's behalf.
    */
   authToken: z.string().min(1).optional(),
+  oauth: OAuthConfigSchema.optional(),
 });
 
 export type HttpTransportConfig = z.infer<typeof HttpTransportConfigSchema>;
@@ -206,7 +274,9 @@ function envString(value: string | undefined): string | undefined {
 
 /** Render Zod issues as `path: message` pairs for operator-facing errors. */
 function formatZodIssues(error: z.ZodError): string[] {
-  return error.issues.map((issue: z.core.$ZodIssue) => `${issue.path.join('.')}: ${issue.message}`);
+  return error.issues.map((issue: z.core.$ZodIssue) =>
+    issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message
+  );
 }
 
 /**
@@ -217,10 +287,28 @@ function formatZodIssues(error: z.ZodError): string[] {
  */
 export function loadHttpTransportConfig(env: EnvSource = process.env): HttpTransportConfig {
   try {
-    return HttpTransportConfigSchema.parse({
+    const mode = AuthModeSchema.parse(envString(env.MCP_AUTH_MODE));
+    const http = HttpTransportConfigSchema.parse({
       bodyLimitBytes: envNumber(env.HTTP_BODY_LIMIT),
       authToken: envString(env.MCP_AUTH_TOKEN),
+      oauth:
+        mode === 'oauth'
+          ? {
+              issuer: envString(env.MCP_OAUTH_ISSUER),
+              resource: envString(env.MCP_OAUTH_RESOURCE),
+              clientId: envString(env.MCP_OAUTH_CLIENT_ID),
+              clientSecret: envString(env.MCP_OAUTH_CLIENT_SECRET),
+              bookstackAudience: envString(env.BOOKSTACK_OAUTH_AUDIENCE),
+            }
+          : undefined,
     });
+    if (http.oauth && http.authToken !== undefined) {
+      throw new Error(
+        'HTTP transport configuration validation failed: MCP_AUTH_TOKEN must be unset when ' +
+          'MCP_AUTH_MODE=oauth, where OAuth access tokens replace the shared secret'
+      );
+    }
+    return http;
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new Error(
@@ -286,7 +374,7 @@ export class ConfigManager {
     const rawConfig = {
       bookstack: {
         baseUrl: process.env.BOOKSTACK_BASE_URL || 'http://localhost:8080/api',
-        apiToken: process.env.BOOKSTACK_API_TOKEN || '',
+        apiToken: process.env.BOOKSTACK_API_TOKEN || undefined,
         timeout: parseInt(process.env.BOOKSTACK_TIMEOUT || '30000', 10),
       },
       server: {

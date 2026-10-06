@@ -108,6 +108,13 @@ services:
       # /message dispatches all 59 tools (permanent-delete, users, roles,
       # permissions) using BOOKSTACK_API_TOKEN. Generate with `openssl rand -hex 32`.
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      # Per-user OAuth instead of the two tokens above; see .env.example.
+      MCP_AUTH_MODE: ${MCP_AUTH_MODE:-}
+      MCP_OAUTH_ISSUER: ${MCP_OAUTH_ISSUER:-}
+      MCP_OAUTH_RESOURCE: ${MCP_OAUTH_RESOURCE:-}
+      MCP_OAUTH_CLIENT_ID: ${MCP_OAUTH_CLIENT_ID:-}
+      MCP_OAUTH_CLIENT_SECRET: ${MCP_OAUTH_CLIENT_SECRET:-}
+      BOOKSTACK_OAUTH_AUDIENCE: ${BOOKSTACK_OAUTH_AUDIENCE:-}
       SERVER_PORT: "3000"
       NODE_ENV: production
     ports:

@@ -429,6 +429,30 @@ function uploadFilename(params: UploadParams, fileField: string, bytes: Buffer):
 }
 
 /**
+ * What this client authenticates to BookStack with.
+ *
+ * `Token` is a BookStack API token (`id:secret`). `Bearer` is an OIDC access token for the
+ * BookStack API audience; `principal` names its user, so rate limits follow the user rather
+ * than each short-lived token.
+ */
+export type BookStackCredential =
+  | { scheme: 'Token'; secret: string }
+  | { scheme: 'Bearer'; secret: string; principal: string };
+
+/** Startup refusal when no BookStack credential is configured; worded as the config check always was. */
+export const MISSING_API_TOKEN_MESSAGE =
+  'Configuration validation failed: bookstack.apiToken: BookStack API token is required - ' +
+  'set BOOKSTACK_API_TOKEN environment variable';
+
+/** The configured API token as a credential; refuses when none is configured. */
+function configuredCredential(config: Config): BookStackCredential {
+  if (!config.bookstack.apiToken) {
+    throw new Error(MISSING_API_TOKEN_MESSAGE);
+  }
+  return { scheme: 'Token', secret: config.bookstack.apiToken };
+}
+
+/**
  * BookStack API Client
  *
  * Provides a comprehensive wrapper around the BookStack REST API
@@ -441,7 +465,12 @@ export class BookStackClient implements BookStackAPIClient {
   private rateLimiter: RateLimiter;
   private config: Config;
 
-  constructor(config: Config, logger: Logger, errorHandler: ErrorHandler) {
+  constructor(
+    config: Config,
+    logger: Logger,
+    errorHandler: ErrorHandler,
+    credential: BookStackCredential = configuredCredential(config)
+  ) {
     this.config = config;
     this.logger = logger;
     this.errorHandler = errorHandler;
@@ -468,7 +497,9 @@ export class BookStackClient implements BookStackAPIClient {
     // their own budget rather than draining someone else's.
     this.rateLimiter = getSharedRateLimiter({
       baseUrl,
-      apiToken: config.bookstack.apiToken,
+      // A Bearer token rotates every few minutes, so its bucket is keyed on the user instead.
+      apiToken:
+        credential.scheme === 'Token' ? credential.secret : `Bearer\u0000${credential.principal}`,
       requestsPerMinute: config.rateLimit.requestsPerMinute,
       burstLimit: config.rateLimit.burstLimit,
     });
@@ -487,7 +518,7 @@ export class BookStackClient implements BookStackAPIClient {
       timeout: config.bookstack.timeout,
       httpsAgent,
       headers: {
-        Authorization: `Token ${config.bookstack.apiToken}`,
+        Authorization: `${credential.scheme} ${credential.secret}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
         'User-Agent': `${config.server.name}/${config.server.version}`,

@@ -168,6 +168,10 @@ MCP_TRANSPORT=http
 # The stdio transport ignores it.
 MCP_AUTH_TOKEN=
 
+# Or per-user OAuth instead of MCP_AUTH_TOKEN/BOOKSTACK_API_TOKEN; see the README's
+# "Per-user OAuth" section.
+# MCP_AUTH_MODE=oauth
+
 # BookStack API Configuration
 BOOKSTACK_BASE_URL=http://localhost:8080/api
 BOOKSTACK_API_TOKEN=your-api-token-here

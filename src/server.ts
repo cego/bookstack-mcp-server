@@ -17,7 +17,8 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
-import { BookStackClient } from './api/client';
+import { BookStackClient, type BookStackCredential, MISSING_API_TOKEN_MESSAGE } from './api/client';
+import { bookstackCredential, createOAuthResourceServer, type OAuthResourceServer } from './auth';
 import {
   type Config,
   ConfigManager,
@@ -135,7 +136,7 @@ export class BookStackMCPServer {
   private tools: Map<string, MCPTool> = new Map();
   private resources: Map<string, MCPResource> = new Map();
 
-  constructor(configOverrides?: Partial<Config>) {
+  constructor(configOverrides?: Partial<Config>, credential?: BookStackCredential) {
     const baseConfig = ConfigManager.getInstance().getConfig();
 
     // Merge overrides
@@ -150,7 +151,7 @@ export class BookStackMCPServer {
     this.logger = Logger.getInstance();
     this.errorHandler = new ErrorHandler(this.logger);
     this.validator = new ValidationHandler(config.validation);
-    this.client = new BookStackClient(config, this.logger, this.errorHandler);
+    this.client = new BookStackClient(config, this.logger, this.errorHandler, credential);
 
     // Initialize MCP server
     this.server = new Server(
@@ -534,6 +535,16 @@ export const MISSING_AUTH_TOKEN_MESSAGE =
   '"Authorization: Bearer <token>", or use MCP_TRANSPORT=stdio, which has no network ' +
   'surface.';
 
+/** OAuth mode never spends a shared BookStack credential, so one configured alongside it is refused. */
+export const OAUTH_WITH_API_TOKEN_MESSAGE =
+  'BOOKSTACK_API_TOKEN must be unset when MCP_AUTH_MODE=oauth: every request calls BookStack as ' +
+  'the authenticated user, with a token exchanged for theirs.';
+
+/** Every OAuth user could upload, and so read back, any file under a shared upload root. */
+export const OAUTH_WITH_UPLOAD_ROOT_MESSAGE =
+  'BOOKSTACK_UPLOAD_ROOT must be unset when MCP_AUTH_MODE=oauth: every authenticated user could ' +
+  'upload, and so read, any file under it. Send uploads inline as base64 instead.';
+
 /**
  * body-parser tags its failures with a `type` (e.g. 'entity.too.large') and an HTTP
  * `status`. Neither is on the `Error` interface, so narrow to this shape rather than
@@ -711,6 +722,90 @@ export const HEALTH_CHECK_FAILED_MESSAGE =
   'The readiness check could not be completed. This is a fault in this server rather than a ' +
   "verdict about BookStack; see this server's logs for the reason.";
 
+/** What a readiness check reports. */
+type HealthReport = Awaited<ReturnType<BookStackMCPServer['getHealth']>>;
+
+/**
+ * Readiness in OAuth mode, where there is no service credential to call BookStack with:
+ * the issuer's discovery loads, and BookStack answers at all (its 401 to an anonymous call counts).
+ */
+async function oauthReadiness(
+  oauth: OAuthResourceServer,
+  baseUrl: string,
+  timeoutMs: number
+): Promise<HealthReport> {
+  const logger = Logger.getInstance();
+  const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
+  const [authorizationServer, bookstackReachable] = await Promise.all([
+    oauth.issuer.probe().then(
+      () => true,
+      (error: unknown) => {
+        logger.warn('Readiness: authorization server discovery failed', { err: error });
+        return false;
+      }
+    ),
+    fetch(`${canonicalBaseUrl(baseUrl)}/system`, { signal }).then(
+      (response) => {
+        void response.body?.cancel();
+        return response.status < 500;
+      },
+      (error: unknown) => {
+        logger.warn('Readiness: BookStack unreachable', { err: error });
+        return false;
+      }
+    ),
+  ]);
+
+  const checks = [
+    {
+      name: 'authorization_server',
+      healthy: authorizationServer,
+      message: 'OAuth issuer discovery',
+    },
+    {
+      name: 'bookstack_reachable',
+      healthy: bookstackReachable,
+      message: 'BookStack API reachable',
+    },
+  ];
+  return { status: checks.every((check) => check.healthy) ? 'healthy' : 'unhealthy', checks };
+}
+
+/**
+ * Per-request credential selection in shared-secret mode. Reachable only by callers that
+ * cleared the bearer check; it is an outbound-request surface, since x-bookstack-url
+ * decides which host this server will talk to on the caller's behalf.
+ */
+function tokenModeOverrides(req: Request, config: Config): Partial<Config> {
+  const bookstackUrl = req.headers['x-bookstack-url'] as string;
+  const bookstackToken = req.headers['x-bookstack-token'] as string;
+
+  return {
+    bookstack: {
+      baseUrl: bookstackUrl || config.bookstack.baseUrl,
+      apiToken: bookstackToken || config.bookstack.apiToken,
+      timeout: config.bookstack.timeout,
+    },
+  };
+}
+
+/** Per-request BookStack overrides would let a caller send the user's BookStack token elsewhere. */
+const refuseUpstreamOverrides: RequestHandler = (req, res, next) => {
+  if (
+    req.headers['x-bookstack-url'] !== undefined ||
+    req.headers['x-bookstack-token'] !== undefined
+  ) {
+    res.status(400).json({
+      error: 'Bad Request',
+      message:
+        'x-bookstack-url and x-bookstack-token are not accepted with OAuth: BookStack is called ' +
+        'as the authenticated user, at the configured BOOKSTACK_BASE_URL.',
+    });
+    return;
+  }
+  next();
+};
+
 /**
  * Build the Express app that serves the HTTP transport.
  *
@@ -720,14 +815,32 @@ export const HEALTH_CHECK_FAILED_MESSAGE =
  * suite stayed green.
  *
  * Fails closed: without an inbound secret there is no app to listen with, so "no auth
- * configured" cannot degrade into "no auth required".
+ * configured" cannot degrade into "no auth required". With `http.oauth` the app is an OAuth
+ * resource server instead, and calls BookStack as each authenticated user.
  */
 export function createHttpApp(options: HttpAppOptions): express.Express {
   const { config, http } = options;
-  const authToken = http.authToken;
+  const oauth = http.oauth
+    ? createOAuthResourceServer(http.oauth, Logger.getInstance(), http.bodyLimitBytes)
+    : undefined;
+  let authenticate: RequestHandler;
 
-  if (!authToken) {
-    throw new Error(MISSING_AUTH_TOKEN_MESSAGE);
+  if (oauth) {
+    if (config.bookstack.apiToken) {
+      throw new Error(OAUTH_WITH_API_TOKEN_MESSAGE);
+    }
+    if (process.env.BOOKSTACK_UPLOAD_ROOT) {
+      throw new Error(OAUTH_WITH_UPLOAD_ROOT_MESSAGE);
+    }
+    authenticate = oauth.authenticate;
+  } else {
+    if (!http.authToken) {
+      throw new Error(MISSING_AUTH_TOKEN_MESSAGE);
+    }
+    if (!config.bookstack.apiToken) {
+      throw new Error(MISSING_API_TOKEN_MESSAGE);
+    }
+    authenticate = requireBearerAuth(http.authToken);
   }
 
   // Same reason, same shape: no app, so nothing to listen with. `ConfigSchema` already
@@ -754,14 +867,21 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
       endpoints: {
         health: '/health (readiness: checks BookStack connectivity)',
         message: '/message (POST, requires an Authorization: Bearer header)',
+        ...(oauth ? { oauth_protected_resource: oauth.metadataPath } : {}),
       },
       documentation: 'Send MCP protocol messages to POST /message',
     });
   });
 
+  if (oauth) {
+    app.get(oauth.metadataPath, (_req, res) => {
+      res.json(oauth.metadata);
+    });
+  }
+
   /** One readiness answer, with the instant it was true at. */
   interface HealthSnapshot {
-    report: Awaited<ReturnType<BookStackMCPServer['getHealth']>>;
+    report: HealthReport;
     /** Wall clock, for `checked_at` only: a timestamp a reader can act on. */
     at: number;
     /** Monotonic reading, for every age comparison. See monotonicNow(). */
@@ -799,8 +919,10 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
    */
   function checkReadiness(): Promise<HealthSnapshot> {
     if (!checkInFlight) {
-      checkInFlight = healthServer()
-        .getHealth()
+      const probe = oauth
+        ? oauthReadiness(oauth, config.bookstack.baseUrl, config.bookstack.timeout)
+        : healthServer().getHealth();
+      checkInFlight = probe
         .then((report) => {
           const snapshot: HealthSnapshot = {
             report,
@@ -890,8 +1012,10 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
     // Order is load-bearing. Authentication runs before express.json() below, so an
     // unauthenticated caller is turned away at the header - it can never make this
     // process buffer a body up to the ceiling, nor reach a BookStackMCPServer (and
-    // therefore the operator's BookStack token).
-    requireBearerAuth(authToken),
+    // therefore the operator's BookStack token). In OAuth mode the override refusal runs
+    // first, so a refused request never spends a token exchange.
+    ...(oauth ? [refuseUpstreamOverrides] : []),
+    authenticate,
     express.json({ limit: http.bodyLimitBytes }),
     createBodyErrorHandler(http.bodyLimitBytes),
     // `req`/`res` are annotated because Express stops inferring handler parameter types
@@ -899,21 +1023,9 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
     // implicitly `any`.
     async (req: Request, res: Response) => {
       try {
-        // Per-request credential selection. Reachable only by callers that cleared the
-        // bearer check above; it is an outbound-request surface, since x-bookstack-url
-        // decides which host this server will talk to on the caller's behalf.
-        const bookstackUrl = req.headers['x-bookstack-url'] as string;
-        const bookstackToken = req.headers['x-bookstack-token'] as string;
-
-        const configOverrides: Partial<Config> = {
-          bookstack: {
-            baseUrl: bookstackUrl || config.bookstack.baseUrl,
-            apiToken: bookstackToken || config.bookstack.apiToken,
-            timeout: config.bookstack.timeout,
-          },
-        };
-
-        const server = new BookStackMCPServer(configOverrides);
+        const server = oauth
+          ? new BookStackMCPServer({ bookstack: config.bookstack }, bookstackCredential(res))
+          : new BookStackMCPServer(tokenModeOverrides(req, config));
         // Omitting `sessionIdGenerator` selects the SDK's stateless mode, which is exactly
         // what passing it as `undefined` did; `exactOptionalPropertyTypes` forbids the
         // explicit-undefined form since the option is declared as `sessionIdGenerator?: () => string`.
