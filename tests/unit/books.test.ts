@@ -3,7 +3,7 @@ import type { BookStackClient } from '../../src/api/client';
 import { BookTools } from '../../src/tools/books';
 import type { Book, BookWithContents, ListResponse, MCPTool } from '../../src/types';
 import type { Logger } from '../../src/utils/logger';
-import type { ValidationHandler } from '../../src/validation/validator';
+import { ValidationHandler } from '../../src/validation/validator';
 
 /**
  * Types only a subset of `T`'s methods, each as a bun:test `Mock` carrying that
@@ -105,12 +105,20 @@ describe('BookTools', () => {
       const mockResponse: ListResponse<Book> = { data: [], total: 0 };
       mockClient.listBooks.mockResolvedValue(mockResponse);
 
-      const listTool = findTool('bookstack_books_list');
+      // The real validator: the defaults are the schema's, not this file's.
+      const listTool = new BookTools(
+        mockClient as unknown as BookStackClient,
+        new ValidationHandler({ enabled: true, strictMode: true }),
+        mockLogger as unknown as Logger
+      )
+        .getTools()
+        .find((tool) => tool.name === 'bookstack_books_list');
+      if (!listTool) throw new Error('Expected tool bookstack_books_list to be registered');
 
       const result = await listTool.handler({});
 
-      expect(mockValidator.validateParams).toHaveBeenCalled();
-      expect(mockClient.listBooks).toHaveBeenCalled();
+      expect(mockClient.listBooks).toHaveBeenCalledTimes(1);
+      expect(mockClient.listBooks).toHaveBeenCalledWith({ count: 20, offset: 0, sort: 'name' });
       expect(result).toEqual(mockResponse);
     });
 

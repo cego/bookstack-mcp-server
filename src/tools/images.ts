@@ -163,13 +163,15 @@ export class ImageTools {
           },
           image: {
             type: 'string',
+            minLength: 1,
             description:
               'Base64 encoded image content. Supply this or file_path, not both. Must be a JPEG, PNG, GIF, WebP or AVIF, and at most 50000 KB.',
           },
           file_path: {
             type: 'string',
+            minLength: 1,
             description:
-              'Path to a file on the server to upload instead of inlining base64. Allowed when the server runs over the stdio transport; over HTTP it requires the operator to set BOOKSTACK_UPLOAD_ROOT and the path must resolve inside it.',
+              'Path to a file on the server to upload instead of inlining base64. Requires the operator to set BOOKSTACK_UPLOAD_ROOT, under every transport, and the path must resolve inside it.',
           },
           type: {
             type: 'string',
@@ -227,7 +229,7 @@ export class ImageTools {
       ],
       usage_patterns: [
         'Upload images first, then use the returned URL to embed them in page HTML/Markdown',
-        'Prefer file_path over base64 for large images, where the transport allows it',
+        'Prefer file_path over base64 for large images, where the operator has set BOOKSTACK_UPLOAD_ROOT',
         'Prefer short names. The uploaded filename is derived from `name`, and BookStack stores the gallery URL in a 191-character column, so a long name silently truncates the returned `url` mid-name (dropping the extension); that URL then serves the HTML app page rather than the image. The upload itself still succeeds and `path` keeps the full name. How long is too long depends on the length of the instance base URL.',
       ],
       related_tools: ['bookstack_pages_update'],
@@ -341,13 +343,15 @@ export class ImageTools {
           },
           image: {
             type: 'string',
+            minLength: 1,
             description:
               'New Base64 encoded image content (Replaces existing image). Supply this or file_path, not both. Should be the same file type as the original image, and at most 50000 KB.',
           },
           file_path: {
             type: 'string',
+            minLength: 1,
             description:
-              'Path to a file on the server to upload instead of inlining base64. Allowed when the server runs over the stdio transport; over HTTP it requires the operator to set BOOKSTACK_UPLOAD_ROOT and the path must resolve inside it.',
+              'Path to a file on the server to upload instead of inlining base64. Requires the operator to set BOOKSTACK_UPLOAD_ROOT, under every transport, and the path must resolve inside it.',
           },
         },
         // At most one content source: unlike create, sending neither is valid here - that

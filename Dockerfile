@@ -50,6 +50,6 @@ USER bun
 # GET /health returns 200 when healthy, 503 otherwise. The image ships `bun`
 # but NOT `node`, so the probe is implemented with `bun -e`.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD bun -e "const r=await fetch('http://localhost:3000/health').catch(()=>null); process.exit(r&&r.status===200?0:1)"
+  CMD bun -e "const r=await fetch('http://localhost:'+(process.env.SERVER_PORT||3000)+'/health').catch(()=>null); process.exit(r&&r.status===200?0:1)"
 
 CMD ["bun", "run", "src/server.ts"]

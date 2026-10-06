@@ -62,7 +62,7 @@ curl http://localhost:3000/health
   "checks": [
     { "name": "bookstack_connection", "healthy": true, "message": "BookStack API connection" },
     { "name": "tools_loaded", "healthy": true, "message": "59 tools loaded" },
-    { "name": "resources_loaded", "healthy": true, "message": "11 resources loaded" }
+    { "name": "resources_loaded", "healthy": true, "message": "5 resources and 6 resource templates loaded" }
   ]
 }
 ```
@@ -1172,7 +1172,7 @@ async function callTool<T>(name: string, args: Record<string, unknown>): Promise
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
       Authorization: `Bearer ${MCP_AUTH_TOKEN}`,
-      // Optional per-request credential override; falls back to the server's env vars
+      // Optional: the caller's own BookStack token, spent at the server's BOOKSTACK_BASE_URL
       'x-bookstack-token': process.env.BOOKSTACK_API_TOKEN ?? '',
     },
     body: JSON.stringify({
@@ -1186,6 +1186,10 @@ async function callTool<T>(name: string, args: Record<string, unknown>): Promise
   const body = await res.json();
   if (body.error) {
     throw new Error(`${name} failed: ${body.error.message}`);
+  }
+  // A tool failure is a result with isError; its text is the message plus JSON details.
+  if (body.result.isError) {
+    throw new Error(`${name} failed: ${body.result.content[0].text}`);
   }
   // Tool results come back as MCP content parts; the payload is JSON in the text part.
   return JSON.parse(body.result.content[0].text) as T;
@@ -1226,10 +1230,11 @@ step (or a service container) before this script runs.
 #### Environment-Specific Configuration
 
 A single running server can address several BookStack instances: `POST /message`
-accepts **per-request credential overrides** via the `x-bookstack-url` and
-`x-bookstack-token` headers, each falling back to `BOOKSTACK_BASE_URL` /
-`BOOKSTACK_API_TOKEN` when omitted. So "environments" are just header sets — you do not
-need one server process per environment.
+accepts **per-request overrides** via the `x-bookstack-url` and `x-bookstack-token`
+headers. The server operator lists every instance's API base URL in
+`BOOKSTACK_ALLOWED_BASE_URLS`, and each request that names one must also carry that
+instance's own token; anything else is refused with a `400`. So "environments" are just
+header sets — you do not need one server process per environment.
 
 ```typescript
 // config/environments.ts
@@ -1294,6 +1299,7 @@ async function callTool<T>(env: Env, name: string, args: Record<string, unknown>
 
   const body = await res.json();
   if (body.error) throw new Error(`${name} failed: ${body.error.message}`);
+  if (body.result.isError) throw new Error(`${name} failed: ${body.result.content[0].text}`);
   return JSON.parse(body.result.content[0].text) as T;
 }
 
@@ -1302,7 +1308,7 @@ const syncEnvironments = async (sourceEnv: Env, targetEnv: Env) => {
   // accepts only book_id / chapter_id / name / created_by / draft / template. Under
   // the shipped default (VALIDATION_STRICT_MODE=true) an unknown key like `tag` is
   // REJECTED at the boundary — `bookstack_pages_list` with `filter: {tag: ...}`
-  // answers JSON-RPC -32602 `Validation failed` / `Unrecognized key: "tag"`. Only
+  // answers an isError result: `Validation failed` / `Unrecognized key: "tag"`. Only
   // with strict mode disabled are the params forwarded to BookStack unchanged, which
   // ignores the unrecognised filter and hands back EVERY page. Neither mode filters
   // by tag, so reach for search.

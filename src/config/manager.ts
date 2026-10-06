@@ -35,9 +35,9 @@ dotenvConfig({ quiet: true });
  * the helper stays beside the identity it defines rather than moving somewhere neutral.
  *
  * This validates without transforming. Canonicalisation stays at the single point that
- * decides identity (getSharedRateLimiter/BookStackClient), so what an operator configured is
- * what getSummary() reports back to them, and `Partial<Config>` overrides - which never pass
- * through this schema - cannot come to depend on the schema having rewritten a value.
+ * decides identity (getSharedRateLimiter/BookStackClient), so `Partial<Config>` overrides -
+ * which never pass through this schema - cannot come to depend on the schema having
+ * rewritten a value.
  */
 const baseUrlCheck = (value: string, ctx: z.RefinementCtx): void => {
   try {
@@ -87,10 +87,6 @@ export const ConfigSchema = z.object({
   logging: z.object({
     level: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
     format: z.enum(['json', 'pretty']).default('pretty'),
-  }),
-  development: z.object({
-    nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
-    debug: z.boolean().default(false),
   }),
 });
 
@@ -182,6 +178,18 @@ export const OAuthConfigSchema = z
 
 export type OAuthConfig = z.infer<typeof OAuthConfigSchema>;
 
+/** baseUrlCheck() for one BOOKSTACK_ALLOWED_BASE_URLS entry, naming that setting. */
+const allowedBaseUrlCheck = (value: string, ctx: z.RefinementCtx): void => {
+  try {
+    canonicalBaseUrl(value);
+  } catch (error) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `BOOKSTACK_ALLOWED_BASE_URLS: ${(error as Error).message}`,
+    });
+  }
+};
+
 const AuthModeSchema = z
   .enum(['token', 'oauth'], { error: "MCP_AUTH_MODE must be 'token' or 'oauth'" })
   .default('token');
@@ -214,6 +222,8 @@ export const HttpTransportConfigSchema = z.object({
    */
   authToken: z.string().min(1).optional(),
   oauth: OAuthConfigSchema.optional(),
+  /** BookStack base URLs `x-bookstack-url` may name (BOOKSTACK_ALLOWED_BASE_URLS); unset refuses the header. */
+  allowedBaseUrls: z.array(z.string().superRefine(allowedBaseUrlCheck)).min(1).optional(),
 });
 
 export type HttpTransportConfig = z.infer<typeof HttpTransportConfigSchema>;
@@ -272,6 +282,15 @@ function envString(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed === '' ? undefined : trimmed;
 }
 
+/** Read a comma-separated environment variable; blank entries are dropped, and none means unset. */
+function envList(value: string | undefined): string[] | undefined {
+  const entries = (value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  return entries.length > 0 ? entries : undefined;
+}
+
 /** Render Zod issues as `path: message` pairs for operator-facing errors. */
 function formatZodIssues(error: z.ZodError): string[] {
   return error.issues.map((issue: z.core.$ZodIssue) =>
@@ -291,6 +310,7 @@ export function loadHttpTransportConfig(env: EnvSource = process.env): HttpTrans
     const http = HttpTransportConfigSchema.parse({
       bodyLimitBytes: envNumber(env.HTTP_BODY_LIMIT),
       authToken: envString(env.MCP_AUTH_TOKEN),
+      allowedBaseUrls: envList(env.BOOKSTACK_ALLOWED_BASE_URLS),
       oauth:
         mode === 'oauth'
           ? {
@@ -394,10 +414,6 @@ export class ConfigManager {
         level: process.env.LOG_LEVEL || 'info',
         format: process.env.LOG_FORMAT || 'pretty',
       },
-      development: {
-        nodeEnv: process.env.NODE_ENV || 'development',
-        debug: process.env.DEBUG === 'true',
-      },
     };
 
     try {
@@ -441,25 +457,6 @@ export class ConfigManager {
   reload(): Config {
     this.config = this.loadConfig();
     return this.config;
-  }
-
-  /**
-   * Get configuration summary for logging
-   */
-  getSummary(): object {
-    const config = this.getConfig();
-    return {
-      bookstack: {
-        baseUrl: config.bookstack.baseUrl,
-        hasApiToken: !!config.bookstack.apiToken,
-        timeout: config.bookstack.timeout,
-      },
-      server: config.server,
-      rateLimit: config.rateLimit,
-      validation: config.validation,
-      logging: config.logging,
-      development: config.development,
-    };
   }
 }
 

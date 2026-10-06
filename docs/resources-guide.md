@@ -22,7 +22,14 @@ This guide covers the **Resources** system in the BookStack MCP Server, which pr
 
 ## Available Resource Types
 
-The BookStack MCP Server provides **12 resource types** across 6 categories:
+The BookStack MCP Server provides **5 resources and 6 resource templates** across 6 categories:
+
+- `resources/list` returns the 5 concrete URIs (`bookstack://books`, `bookstack://pages`,
+  `bookstack://chapters`, `bookstack://shelves`, `bookstack://users`).
+- `resources/templates/list` returns the 6 templates as `uriTemplate` entries
+  (`bookstack://books/{id}`, `bookstack://pages/{id}`, `bookstack://chapters/{id}`,
+  `bookstack://shelves/{id}`, `bookstack://users/{id}`, `bookstack://search/{query}`).
+  Fill in the placeholder and pass the concrete URI to `resources/read`.
 
 ### 1. Book Resources
 
@@ -331,7 +338,7 @@ The BookStack MCP resources include enhanced schema definitions with:
 
 All resources include these standard properties:
 
-- `uri`: Resource identifier pattern
+- `uri`: Resource identifier, or the URI template (published as `uriTemplate` on `resources/templates/list`)
 - `name`: Human-readable name
 - `description`: Detailed description of the resource
 - `mimeType`: Content type (typically `application/json`)
@@ -559,8 +566,9 @@ const overview = {
 Use resource metadata for dynamic applications:
 
 ```javascript
-// Discover available resources
+// Discover available resources; parameterised ones come from listResourceTemplates()
 const resources = await listResources();
+const templates = await listResourceTemplates(); // e.g. { uriTemplate: 'bookstack://books/{id}' }
 const bookResources = resources.filter(r => r.uri.includes('books'));
 
 // Build dynamic navigation

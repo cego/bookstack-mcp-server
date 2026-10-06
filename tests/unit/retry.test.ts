@@ -179,7 +179,6 @@ describe('BookStackClient retry policy', () => {
       rateLimit: { requestsPerMinute: 60_000, burstLimit: 10_000 },
       validation: { enabled: true, strictMode: true },
       logging: { level: 'error', format: 'pretty' },
-      development: { nodeEnv: 'test', debug: false },
     };
 
     client = new BookStackClient(config, noopLogger, new ErrorHandler(noopLogger));

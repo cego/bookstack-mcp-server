@@ -60,7 +60,6 @@ function makeConfig(harness: BookStackHarness): Config {
     rateLimit: { requestsPerMinute: 600, burstLimit: 50 },
     validation: { enabled: true, strictMode: false },
     logging: { level: 'error', format: 'json' },
-    development: { nodeEnv: 'test', debug: false },
   };
 }
 

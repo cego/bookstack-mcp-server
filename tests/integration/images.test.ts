@@ -261,7 +261,6 @@ describe.skipIf(!runIntegration)('BookStack image tools (live)', () => {
       // which is what lets the rejection tests assert on a real failure.
       validation: { enabled: true, strictMode: true },
       logging: { level: 'error', format: 'json' },
-      development: { nodeEnv: 'test', debug: false },
     };
     const client = new BookStackClient(config, logger, new ErrorHandler(logger));
     imageTools = new ImageTools(
@@ -575,7 +574,7 @@ describe.skipIf(!runIntegration)('BookStack image tools (live)', () => {
     'creates an image from file_path with no name, taking the file basename',
     async () => {
       setGuardEnv('MCP_TRANSPORT', 'stdio');
-      setGuardEnv('BOOKSTACK_UPLOAD_ROOT', undefined);
+      setGuardEnv('BOOKSTACK_UPLOAD_ROOT', uploadRoot);
 
       const basename = `${uniqueName('itest-img-unnamed-file')}.png`;
       const filePath = join(uploadRoot, basename);
@@ -737,10 +736,10 @@ describe.skipIf(!runIntegration)('BookStack image tools (live)', () => {
 
   describe('file_path uploads', () => {
     it(
-      'uploads a file from disk under the stdio transport',
+      'uploads a file inside BOOKSTACK_UPLOAD_ROOT under the stdio transport',
       async () => {
         setGuardEnv('MCP_TRANSPORT', 'stdio');
-        setGuardEnv('BOOKSTACK_UPLOAD_ROOT', undefined);
+        setGuardEnv('BOOKSTACK_UPLOAD_ROOT', uploadRoot);
 
         const name = `${uniqueName('itest-img-stdio')}.png`;
         const filePath = join(uploadRoot, name);
@@ -763,24 +762,27 @@ describe.skipIf(!runIntegration)('BookStack image tools (live)', () => {
     );
 
     it(
-      'refuses file_path over a remote-capable transport without BOOKSTACK_UPLOAD_ROOT',
+      'refuses file_path without BOOKSTACK_UPLOAD_ROOT under stdio and http alike',
       async () => {
-        setGuardEnv('MCP_TRANSPORT', 'http');
         setGuardEnv('BOOKSTACK_UPLOAD_ROOT', undefined);
 
-        const name = `${uniqueName('itest-img-refused')}.png`;
-        const filePath = join(uploadRoot, name);
-        await writeFile(filePath, PNG_RED);
+        for (const transport of ['stdio', 'http']) {
+          setGuardEnv('MCP_TRANSPORT', transport);
 
-        await expect(
-          runTool('bookstack_images_create', { name, file_path: filePath, uploaded_to: pageId })
-        ).rejects.toThrow(/'file_path' is refused under the 'http' transport/);
+          const name = `${uniqueName('itest-img-refused')}.png`;
+          const filePath = join(uploadRoot, name);
+          await writeFile(filePath, PNG_RED);
 
-        // Refusal is real, not cosmetic: nothing reached the gallery.
-        const listed = (await runTool('bookstack_images_list', {
-          filter: { name },
-        })) as ListResponse<Image>;
-        expect(listed.data).toEqual([]);
+          await expect(
+            runTool('bookstack_images_create', { name, file_path: filePath, uploaded_to: pageId })
+          ).rejects.toThrow(/BOOKSTACK_UPLOAD_ROOT is not set/);
+
+          // Refusal is real, not cosmetic: nothing reached the gallery.
+          const listed = (await runTool('bookstack_images_list', {
+            filter: { name },
+          })) as ListResponse<Image>;
+          expect(listed.data).toEqual([]);
+        }
       },
       TEST_TIMEOUT_MS
     );
@@ -801,7 +803,7 @@ describe.skipIf(!runIntegration)('BookStack image tools (live)', () => {
 
         await expect(
           runTool('bookstack_images_create', { name, file_path: traversal, uploaded_to: pageId })
-        ).rejects.toThrow(/which is outside BOOKSTACK_UPLOAD_ROOT/);
+        ).rejects.toThrow(/must name a readable file inside BOOKSTACK_UPLOAD_ROOT/);
 
         const listed = (await runTool('bookstack_images_list', {
           filter: { name },

@@ -6,11 +6,11 @@ This document provides an overview of every tool implemented in the BookStack MC
 
 ## Executive Summary
 
-The BookStack MCP Server provides **59 tools** (and **11 resources**) organized into **13 categories**, implementing the supported subset of the BookStack knowledge management API. Each tool follows consistent patterns for validation, error handling, and logging.
+The BookStack MCP Server provides **59 tools** (plus **5 resources** and **6 resource templates**) organized into **13 categories**, implementing the supported subset of the BookStack knowledge management API. Each tool follows consistent patterns for validation, error handling, and logging.
 
 The categories below are the ones returned by `bookstack_tool_categories`, and the
 per-category counts add up to the 59 tools the server registers at boot (it logs
-`Registered 59 tools` / `Registered 11 resources` on startup):
+`Registered 59 tools` / `Registered 5 resources and 6 resource templates` on startup):
 
 | Section | Category | Tools |
 |---------|----------|-------|
@@ -98,7 +98,7 @@ The guards, and why each exists:
 | `dry_run` | Applies the edits in memory and reports what would change. Nothing is sent to BookStack. |
 | `expected_updated_at` | Best-effort stale-page preflight against `updated_at`. It catches a page changed before the server reads it; BookStack has no atomic version condition, so it cannot prevent a later racing write. |
 | Shrink guard | A result smaller than half the original is refused unless `allow_shrink` is set, so an anchor that accidentally swallows most of the document cannot be applied. |
-| Post-write verification | The page is re-read and the written fragments are looked for in normalised text — BookStack rewrites stored HTML on save (heading anchors, injected `id` attributes), so a byte comparison would report every success as a failure. A fragment that cannot be found comes back as `verified: false` rather than an error: the write did happen. |
+| Post-write verification | The page is re-read and the written fragments are looked for in the raw stored source, then in normalised text — BookStack rewrites stored HTML on save (heading anchors, injected `id` attributes), so a byte comparison alone would report every success as a failure. A fragment that cannot be found comes back as `verified: false` rather than an error: the write did happen. If the re-read itself fails, the result is `verified: null` with a note, so a client does not retry a write that landed. |
 
 Every write creates a BookStack revision, so an applied edit can be rolled back in the UI.
 No response from these tools contains page content, which is what keeps it out of the model.
@@ -357,12 +357,21 @@ bookstack_audit_log_list({ filter: { loggable_type: "page", loggable_id: 42 } })
 ```
 
 > ⚠️ `count` above 500 is **rejected, not clamped**. With `VALIDATION_STRICT_MODE`
-> (default `true`) the schema's upper bound fails the call at the boundary:
+> (default `true`) the schema's upper bound fails the call at the boundary. The result
+> has `isError: true`, and its text content reads:
 >
-> ```json
-> { "code": -32602, "message": "MCP error -32602: Validation failed",
->   "data": { "type": "validation_error",
->             "validation": [{ "field": "count", "message": "Too big: expected number to be <=500" }] } }
+> ```
+> Validation failed
+>
+> {
+>   "type": "validation_error",
+>   "validation": [
+>     {
+>       "field": "count",
+>       "message": "Too big: expected number to be <=500"
+>     }
+>   ]
+> }
 > ```
 >
 > This applies to the audit log and recycle bin listings too. `bookstack_search` is
@@ -427,15 +436,22 @@ bookstack_audit_log_list({ filter: { loggable_type: "page", loggable_id: 42 } })
    - Recovery: Wait and retry with exponential backoff
 
 ### Error Response Format
+
+A tool that fails - invalid arguments, a BookStack error, a page edit that cannot be
+applied - returns a normal `tools/call` result with `isError: true`, so the model can
+read the reason and correct its call. The text holds the message, a blank line, then
+the details as JSON: `type`, `validation` issues with their field paths, BookStack's
+`status` and `details`, and recovery hints such as `found_with_different_whitespace`,
+`available_sections` or `matched_sections`.
+
 ```typescript
 {
-  error: {
-    code: string,
-    message: string,
-    details?: object
-  }
+  isError: true,
+  content: [{ type: 'text', text: string }]
 }
 ```
+
+An unknown tool name and a failed `resources/read` stay JSON-RPC errors.
 
 ## Validation and Security
 
@@ -579,6 +595,6 @@ The modular architecture allows for easy extension:
 
 ## Conclusion
 
-The BookStack MCP Server is a production-ready implementation providing LLMs with access to the supported subset of BookStack's API. With 59 tools across 13 categories, 11 resources, robust error handling, strict validation, and extensive documentation, it enables sophisticated knowledge management workflows while maintaining security and reliability.
+The BookStack MCP Server is a production-ready implementation providing LLMs with access to the supported subset of BookStack's API. With 59 tools across 13 categories, 5 resources and 6 resource templates, robust error handling, strict validation, and extensive documentation, it enables sophisticated knowledge management workflows while maintaining security and reliability.
 
 The consistent patterns, extensive examples, and self-documenting capabilities make it easy for LLMs to understand and effectively utilize the full power of the BookStack platform through the MCP protocol.

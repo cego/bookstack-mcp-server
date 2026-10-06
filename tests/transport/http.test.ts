@@ -15,7 +15,8 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import type { Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { type AddressInfo, createServer as createNetServer } from 'node:net';
+import { join } from 'node:path';
 import pkg from '../../package.json' with { type: 'json' };
 import {
   type Config,
@@ -30,6 +31,7 @@ import { resetSharedRateLimiters } from '../../src/utils/rateLimit';
 
 /** Port 9 is the discard service: reliably closed, so BookStack calls fail fast. */
 const UNREACHABLE_BOOKSTACK = 'http://127.0.0.1:9/api';
+const SERVER_ENTRY = join(import.meta.dir, '..', '..', 'src', 'server.ts');
 const TEST_AUTH_TOKEN = 'test-inbound-secret-0123456789';
 
 /**
@@ -280,6 +282,33 @@ describe('HTTP transport configuration', () => {
     expect(loadHttpTransportConfig({ MCP_AUTH_TOKEN: '' }).authToken).toBeUndefined();
     expect(loadHttpTransportConfig({}).authToken).toBeUndefined();
   });
+
+  it('reads BOOKSTACK_ALLOWED_BASE_URLS as a comma-separated list, treating blank as unset', () => {
+    expect(
+      loadHttpTransportConfig({
+        BOOKSTACK_ALLOWED_BASE_URLS: ' https://a.example/api , ,https://b.example/api',
+      }).allowedBaseUrls
+    ).toEqual(['https://a.example/api', 'https://b.example/api']);
+    expect(
+      loadHttpTransportConfig({ BOOKSTACK_ALLOWED_BASE_URLS: ' , ' }).allowedBaseUrls
+    ).toBeUndefined();
+    expect(loadHttpTransportConfig({}).allowedBaseUrls).toBeUndefined();
+  });
+
+  it('rejects an unusable BOOKSTACK_ALLOWED_BASE_URLS entry without echoing it', () => {
+    let message = '';
+    try {
+      loadHttpTransportConfig({
+        BOOKSTACK_ALLOWED_BASE_URLS:
+          'https://a.example/api,https://b.example/api?api_token=allowlist-leak-marker',
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('BOOKSTACK_ALLOWED_BASE_URLS');
+    expect(message).not.toContain('allowlist-leak-marker');
+  });
 });
 
 describe('GET / identity', () => {
@@ -365,6 +394,45 @@ describe('HTTP transport startup', () => {
 
     expect((await fetch(`${url}/`)).status).toBe(200);
   });
+
+  it('exits 1 with a clear message when the port is already in use', async () => {
+    const holder = createNetServer();
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.listen(0, () => resolve());
+    });
+    const port = (holder.address() as AddressInfo).port;
+
+    try {
+      const proc = Bun.spawn({
+        cmd: [process.execPath, 'run', SERVER_ENTRY],
+        cwd: join(import.meta.dir, '..', '..'),
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? '',
+          MCP_TRANSPORT: 'http',
+          MCP_AUTH_TOKEN: TEST_AUTH_TOKEN,
+          BOOKSTACK_API_TOKEN: 'stub-id:stub-secret',
+          BOOKSTACK_BASE_URL: UNREACHABLE_BOOKSTACK,
+          SERVER_PORT: String(port),
+          LOG_FORMAT: 'json',
+        },
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const timer = setTimeout(() => proc.kill(), 15_000);
+      const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+      clearTimeout(timer);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain(`Failed to start HTTP transport: cannot listen on port ${port}`);
+      expect(stderr).toContain('EADDRINUSE');
+      expect(stderr).not.toContain('listening on port');
+    } finally {
+      holder.close();
+    }
+  }, 20_000);
 });
 
 /**
@@ -626,7 +694,7 @@ describe('an unusable configured base URL fails before the server listens', () =
 
     // Refused inside the authenticated route, where an authenticated caller's own mistake
     // belongs - not at startup, and not by being forwarded to axios.
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
     expect(text).not.toContain('override-leak-marker');
     expect(text).not.toContain('books.example');
   }, 15_000);
@@ -815,6 +883,25 @@ describe('unauthenticated endpoints', () => {
     expect(response.status).toBe(404);
     expect(((await response.json()) as { error?: string }).error).toBe('Not Found');
   });
+
+  it.each(['GET', 'DELETE'])(
+    'answers %s /message with 405 and Allow: POST, before authentication',
+    async (method) => {
+      const { url } = await startApp({
+        bodyLimitBytes: DEFAULT_HTTP_BODY_LIMIT_BYTES,
+        authToken: TEST_AUTH_TOKEN,
+      });
+
+      for (const headers of [{}, { authorization: `Bearer ${TEST_AUTH_TOKEN}` }]) {
+        const response = await fetch(`${url}/message`, { method, headers });
+
+        expect(response.status).toBe(405);
+        expect(response.headers.get('allow')).toBe('POST');
+        expect(response.headers.get('www-authenticate')).toBeNull();
+        expect(((await response.json()) as { error?: string }).error).toBe('Method Not Allowed');
+      }
+    }
+  );
 });
 
 /* ------------------------------------------------------------- a stub BookStack -- */

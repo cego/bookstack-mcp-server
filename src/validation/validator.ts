@@ -738,9 +738,9 @@ const ValidationSchemas = {
     .strictObject({
       uploaded_to: entityId,
       name: z.string().min(1).max(255),
-      file: z.string().optional(), // base64 encoded
+      file: z.string().min(1).optional(), // base64 encoded
       file_path: z.string().min(1).optional(), // server-local path
-      link: z.string().url().optional(),
+      link: z.string().url().max(2000).optional(),
     })
     .superRefine((data, ctx) => {
       const { sources, conflictMessage } = providedAttachmentSources(data);
@@ -766,9 +766,9 @@ const ValidationSchemas = {
       id: entityId,
       uploaded_to: entityId.optional(),
       name: z.string().min(1).max(255).optional(),
-      file: z.string().optional(), // base64 encoded
+      file: z.string().min(1).optional(), // base64 encoded
       file_path: z.string().min(1).optional(), // server-local path
-      link: z.string().url().optional(),
+      link: z.string().url().max(2000).optional(),
     })
     .superRefine((data, ctx) => {
       const { sources, conflictMessage } = providedAttachmentSources(data);
@@ -807,7 +807,7 @@ const ValidationSchemas = {
   imageCreate: z
     .strictObject({
       name: z.string().min(1).max(180).optional(),
-      image: z.string().optional(), // base64 encoded
+      image: z.string().min(1).optional(), // base64 encoded
       file_path: z.string().min(1).optional(), // server-local path
       type: z.enum(['gallery', 'drawio']).default('gallery'),
       uploaded_to: entityId, // required by BookStack
@@ -823,7 +823,7 @@ const ValidationSchemas = {
     .strictObject({
       id: entityId,
       name: z.string().min(1).max(180).optional(),
-      image: z.string().optional(), // base64 encoded
+      image: z.string().min(1).optional(), // base64 encoded
       file_path: z.string().min(1).optional(), // server-local path
     })
     .refine((data) => !(data.image && data.file_path), {
@@ -1109,30 +1109,6 @@ export class ValidationHandler {
       });
       return params as T;
     }
-  }
-
-  /**
-   * Validate required fields are present
-   */
-  validateRequired(params: Record<string, unknown>, requiredFields: string[]): void {
-    if (!this.enabled) {
-      return;
-    }
-
-    const missing = requiredFields.filter(
-      (field) => params[field] === undefined || params[field] === null
-    );
-
-    if (missing.length > 0) {
-      throw new Error(`Missing required fields: ${missing.join(', ')}`);
-    }
-  }
-
-  /**
-   * Get available schemas
-   */
-  getAvailableSchemas(): string[] {
-    return Object.keys(ValidationSchemas);
   }
 }
 

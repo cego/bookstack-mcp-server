@@ -177,6 +177,19 @@ describe('OAuth discovery', () => {
     });
   });
 
+  it.each(['GET', 'DELETE'])(
+    'answers %s /message with 405 and Allow: POST, before authentication',
+    async (method) => {
+      const url = await startApp();
+
+      const response = await fetch(`${url}/message`, { method });
+
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toBe('POST');
+      expect(response.headers.get('www-authenticate')).toBeNull();
+    }
+  );
+
   it('challenges a request without a token with the metadata location', async () => {
     const url = await startApp();
 

@@ -42,7 +42,11 @@ export interface Heading {
 export interface GrepMatch {
   offset: number;
   match: string;
+  /** Exact stored source around the match, usable verbatim as an `old_string` anchor. */
   context: string;
+  /** Whether the page continues before / after `context`. */
+  context_truncated_start: boolean;
+  context_truncated_end: boolean;
 }
 
 /**
@@ -78,6 +82,8 @@ export class PageStaleError extends Error {
 
 const CONTEXT_RADIUS = 120;
 const MAX_DIAGNOSTIC_LENGTH = 300;
+/** Longest anchor, in words, the whitespace-tolerant search runs for: its cost is page words x anchor words. */
+const MAX_TOLERANT_MATCH_WORDS = 256;
 
 /** Escape literal text for a regular expression that must retain literal semantics. */
 function escapeRegExp(value: string): string {
@@ -144,9 +150,12 @@ function findWhitespaceTolerantMatch(source: string, needle: string): string | n
     return null;
   }
 
-  const pattern = trimmed.split(/\s+/).map(escapeRegExp).join('\\s+');
+  const words = trimmed.split(/\s+/);
+  if (words.length > MAX_TOLERANT_MATCH_WORDS) {
+    return null;
+  }
 
-  const match = new RegExp(pattern).exec(source);
+  const match = new RegExp(words.map(escapeRegExp).join('\\s+')).exec(source);
   if (!match) {
     return null;
   }
@@ -242,10 +251,12 @@ export function applyEdits(
 
 /**
  * Strip tags and decode the handful of entities BookStack emits in headings.
+ *
+ * A tag is `<[^<>]*>`, not `<[^>]*>`: the latter is quadratic on a run of unmatched '<'.
  */
 function htmlToText(html: string): string {
   return html
-    .replace(/<[^>]*>/g, '')
+    .replace(/<[^<>]*>/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
@@ -282,43 +293,200 @@ export function containsNormalized(
   return normalizeForComparison(haystack, writeField).includes(normalizedNeedle);
 }
 
+/** What `^`, `$` and `.` treat as a line break in a multiline JavaScript regex. */
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+function isBlank(char: string | undefined): boolean {
+  return char === ' ' || char === '\t';
+}
+
+/** Read one line as a markdown heading, in linear time; the equivalent regex backtracked quadratically. */
+function markdownHeading(line: string): { level: number; text: string } | undefined {
+  let level = 0;
+  while (line[level] === '#') {
+    level += 1;
+  }
+  if (level === 0 || level > 6) {
+    return undefined;
+  }
+
+  let start = level;
+  while (isBlank(line[start])) {
+    start += 1;
+  }
+  if (start === level) {
+    return undefined;
+  }
+  if (start === line.length) {
+    // Blanks only: the lazy title takes the last blank, so a second one is needed.
+    return start - level > 1 ? { level, text: '' } : undefined;
+  }
+
+  // Drop closing hashes, then the blanks before them, keeping at least one character.
+  let end = line.length;
+  while (end > start && line[end - 1] === '#') {
+    end -= 1;
+  }
+  while (end > start && isBlank(line[end - 1])) {
+    end -= 1;
+  }
+  return { level, text: line.slice(start, Math.max(end, start + 1)).trim() };
+}
+
+interface CodeFence {
+  char: string;
+  length: number;
+  rest: string;
+}
+
+/** Read one line as a code fence: up to three spaces, then three or more ` or ~. */
+function codeFence(line: string): CodeFence | undefined {
+  let indent = 0;
+  while (indent < 4 && line[indent] === ' ') {
+    indent += 1;
+  }
+  const char = line[indent];
+  if (indent > 3 || (char !== '`' && char !== '~')) {
+    return undefined;
+  }
+
+  let end = indent;
+  while (line[end] === char) {
+    end += 1;
+  }
+  return end - indent >= 3 ? { char, length: end - indent, rest: line.slice(end) } : undefined;
+}
+
+function markdownHeadings(source: string): Omit<Heading, 'length'>[] {
+  const headings: Omit<Heading, 'length'>[] = [];
+  let openFence: CodeFence | undefined;
+  let offset = 0;
+  for (const line of source.split(LINE_TERMINATOR)) {
+    const fence = codeFence(line);
+    if (openFence) {
+      // Closed only by the same character, at least as long, with nothing after it.
+      const closes =
+        fence?.char === openFence.char &&
+        fence.length >= openFence.length &&
+        fence.rest.trim() === '';
+      if (closes) {
+        openFence = undefined;
+      }
+    } else if (fence && !(fence.char === '`' && fence.rest.includes('`'))) {
+      openFence = fence;
+    } else {
+      const heading = markdownHeading(line);
+      if (heading) {
+        headings.push({ ...heading, offset });
+      }
+    }
+    offset += line.length + 1;
+  }
+  return headings;
+}
+
+/** First match of global `pattern` at or after a never-decreasing `from`, so all calls scan `text` once. */
+function forwardSearch(text: string, pattern: RegExp): (from: number) => number {
+  let found: number | undefined;
+  return (from) => {
+    if (found !== undefined && (found === -1 || found >= from)) {
+      return found;
+    }
+    pattern.lastIndex = from;
+    found = pattern.exec(text)?.index ?? -1;
+    return found;
+  };
+}
+
+/** Every html heading in one forward pass; the equivalent regex was quadratic on unterminated tags. */
+function htmlHeadings(source: string): Omit<Heading, 'length'>[] {
+  const headings: Omit<Heading, 'length'>[] = [];
+  const opening = /<h([1-6])\b/gi;
+  const nextTagEnd = forwardSearch(source, />/g);
+  const nextClosing = [1, 2, 3, 4, 5, 6].map((level) =>
+    forwardSearch(source, new RegExp(`</h${level}>`, 'gi'))
+  );
+
+  for (let open = opening.exec(source); open; open = opening.exec(source)) {
+    const tagEnd = nextTagEnd(opening.lastIndex);
+    if (tagEnd === -1) {
+      // No later `<hN` can be terminated either.
+      break;
+    }
+
+    const level = Number(open[1]);
+    const closeAt = nextClosing[level - 1](tagEnd + 1);
+    if (closeAt === -1) {
+      continue;
+    }
+
+    headings.push({
+      level,
+      text: htmlToText(source.slice(tagEnd + 1, closeAt)),
+      offset: open.index,
+    });
+    opening.lastIndex = closeAt + `</h${level}>`.length;
+  }
+
+  return headings;
+}
+
 /**
  * Map the heading structure of a page, so a large page can be navigated
  * without loading its content.
  */
 export function buildOutline(source: string, writeField: PageWriteField): Heading[] {
-  const headings: Omit<Heading, 'length'>[] = [];
+  const headings: Heading[] = (
+    writeField === 'markdown' ? markdownHeadings(source) : htmlHeadings(source)
+  ).map((heading) => ({ ...heading, length: source.length - heading.offset }));
 
-  // `matchAll` rather than a `while ((m = re.exec(s)))` loop: the assignment-in-condition
-  // form is what the linter flags, and matchAll also advances past a zero-length match on its
-  // own, which that loop has to remember to do by hand.
-  if (writeField === 'markdown') {
-    for (const match of source.matchAll(/^(#{1,6})[ \t]+(.+?)[ \t]*#*$/gm)) {
-      headings.push({
-        level: match[1].length,
-        text: match[2].trim(),
-        offset: match.index,
-      });
+  // A section runs to the next heading of the same or a higher level, subsections included.
+  const open: Heading[] = [];
+  for (const heading of headings) {
+    while (open.length > 0 && (open.at(-1) as Heading).level >= heading.level) {
+      const closed = open.pop() as Heading;
+      closed.length = heading.offset - closed.offset;
     }
-  } else {
-    for (const match of source.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)) {
-      headings.push({
-        level: Number(match[1]),
-        text: htmlToText(match[2]),
-        offset: match.index,
-      });
-    }
+    open.push(heading);
   }
+  return headings;
+}
 
-  return headings.map((heading, i) => ({
-    ...heading,
-    length: (i + 1 < headings.length ? headings[i + 1].offset : source.length) - heading.offset,
-  }));
+/** The heading a section name addresses: exact (trimmed, case-insensitive) first, else the one containing it. */
+export function findSection(source: string, section: string, writeField: PageWriteField): Heading {
+  const headings = buildOutline(source, writeField);
+  const wanted = section.trim().toLowerCase();
+  const exact = headings.filter((h) => h.text.trim().toLowerCase() === wanted);
+  const matches =
+    exact.length > 0 ? exact : headings.filter((h) => h.text.toLowerCase().includes(wanted));
+
+  if (matches.length === 0) {
+    throw new PageContentError(`Section not found: ${section}`, {
+      available_sections: headings.map((h) => h.text),
+      hint: 'Use bookstack_pages_outline to list the exact heading texts.',
+    });
+  }
+  if (matches.length > 1) {
+    throw new PageContentError(`Section is ambiguous: ${matches.length} headings match`, {
+      matching_sections: matches.map((h) => h.text),
+      hint: 'Pass the full text of exactly one heading. Headings with identical text cannot be told apart; anchor a bookstack_pages_edit on the text instead.',
+    });
+  }
+  return matches[0];
+}
+
+/** Whether cutting `text` at `index` would split a surrogate pair. */
+function splitsSurrogatePair(text: string, index: number): boolean {
+  const high = text.charCodeAt(index - 1);
+  const low = text.charCodeAt(index);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
 }
 
 /**
  * Search inside page content and return exact matches with surrounding
  * context, suitable for building an `old_string` anchor.
+ *
+ * `context` is an exact slice of the source with no ellipses; the flags say where it was cut.
  */
 export function grepContent(
   source: string,
@@ -344,10 +512,22 @@ export function grepContent(
   for (const match of source.matchAll(regex)) {
     total += 1;
     if (matches.length < maxMatches) {
+      const matchEnd = match.index + match[0].length;
+      let start = Math.max(0, match.index - contextChars);
+      let end = Math.min(source.length, matchEnd + contextChars);
+      // Half a surrogate pair cannot be sent back as an anchor.
+      if (start < match.index && splitsSurrogatePair(source, start)) {
+        start += 1;
+      }
+      if (end > matchEnd && splitsSurrogatePair(source, end)) {
+        end -= 1;
+      }
       matches.push({
         offset: match.index,
         match: match[0],
-        context: contextAround(source, match.index, contextChars),
+        context: source.slice(start, end),
+        context_truncated_start: start > 0,
+        context_truncated_end: end < source.length,
       });
     }
   }
@@ -357,6 +537,8 @@ export function grepContent(
 
 /**
  * Insert content at the start or end of a page, or of a named section.
+ *
+ * Returns the new source and, when a section was named, the heading it resolved to.
  */
 export function insertContent(
   source: string,
@@ -367,26 +549,16 @@ export function insertContent(
     separator?: string;
     writeField: PageWriteField;
   }
-): string {
+): { result: string; heading: Heading | undefined } {
   const { position = 'end', section, writeField } = options;
   const separator = options.separator ?? (writeField === 'markdown' ? '\n\n' : '\n');
 
   let rangeStart = 0;
   let rangeEnd = source.length;
+  let found: Heading | undefined;
 
   if (section) {
-    const headings = buildOutline(source, writeField);
-    const wanted = section.trim().toLowerCase();
-    const found =
-      headings.find((h) => h.text.toLowerCase() === wanted) ??
-      headings.find((h) => h.text.toLowerCase().includes(wanted));
-
-    if (!found) {
-      throw new PageContentError(`Section not found: ${section}`, {
-        available_sections: headings.map((h) => h.text),
-        hint: 'Use bookstack_pages_outline to list the exact heading texts.',
-      });
-    }
+    found = findSection(source, section, writeField);
 
     // "start" means directly after the heading itself, not before it
     const headingBlock = source.slice(found.offset, found.offset + found.length);
@@ -414,9 +586,11 @@ export function insertContent(
     }
   }
 
-  return insertAt > 0
-    ? `${source.slice(0, insertAt)}${separator}${content}${source.slice(insertAt)}`
-    : `${content}${separator}${source.slice(insertAt)}`;
+  const result =
+    insertAt > 0
+      ? `${source.slice(0, insertAt)}${separator}${content}${source.slice(insertAt)}`
+      : `${content}${separator}${source.slice(insertAt)}`;
+  return { result, heading: found };
 }
 
 /**

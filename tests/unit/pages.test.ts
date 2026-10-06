@@ -73,7 +73,13 @@ const page = (overrides: Partial<PageWithContent> = {}): PageWithContent => ({
 interface GrepResult {
   total_matches: number;
   total_chars: number;
-  matches: Array<{ match: string; offset: number }>;
+  matches: Array<{
+    match: string;
+    offset: number;
+    context: string;
+    context_truncated_start: boolean;
+    context_truncated_end: boolean;
+  }>;
   content?: string;
 }
 interface OutlineResult {
@@ -82,7 +88,8 @@ interface OutlineResult {
 }
 interface WriteResult {
   written: boolean;
-  verified: boolean;
+  verified: boolean | null;
+  note?: string;
   unverified_fragment_count: number;
   revision_count: number;
   updated_at: string;
@@ -215,6 +222,38 @@ describe('PageTools partial editing', () => {
         tool('bookstack_pages_read').handler({ id: PAGE_ID, grep: 'x'.repeat(1001) })
       ).rejects.toThrow();
       expect(mockClient.getPage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('grep anchor round trip', () => {
+    it('accepts a grep context verbatim as the old_string of an edit', async () => {
+      const expected = '<p>First paragraph</p><p>Third paragraph</p>';
+      mockClient.getPage
+        .mockResolvedValueOnce(page())
+        .mockResolvedValueOnce(page())
+        .mockResolvedValueOnce(page({ raw_html: expected }));
+      mockClient.updatePage.mockResolvedValue(page());
+
+      const grep = await call<GrepResult>('bookstack_pages_read', {
+        id: PAGE_ID,
+        grep: 'Second',
+        context: 5,
+      });
+      const [hit] = grep.matches;
+
+      expect(hit).toMatchObject({
+        context: 'p><p>Second para',
+        context_truncated_start: true,
+        context_truncated_end: true,
+      });
+
+      const result = await call<WriteResult>('bookstack_pages_edit', {
+        id: PAGE_ID,
+        edits: [{ old_string: hit.context, new_string: hit.context.replace(hit.match, 'Third') }],
+      });
+
+      expect(mockClient.updatePage).toHaveBeenCalledWith(PAGE_ID, { html: expected });
+      expect(result.verified).toBe(true);
     });
   });
 
@@ -470,6 +509,64 @@ describe('PageTools partial editing', () => {
       expect(result.unverified_fragment_count).toBe(1);
     });
 
+    it('verifies a formatting-only edit against the stored markup', async () => {
+      mockClient.getPage
+        .mockResolvedValueOnce(page({ raw_html: '<p><b>x</b> rest</p>' }))
+        .mockResolvedValueOnce(page({ raw_html: '<p id="bkmrk-x-rest"><i>x</i> rest</p>' }));
+      mockClient.updatePage.mockResolvedValue(page());
+
+      const result = await call<WriteResult>('bookstack_pages_edit', {
+        id: PAGE_ID,
+        edits: [{ old_string: '<b>x</b>', new_string: '<i>x</i>' }],
+      });
+
+      expect(mockClient.updatePage).toHaveBeenCalledWith(PAGE_ID, {
+        html: '<p><i>x</i> rest</p>',
+      });
+      expect(result.verified).toBe(true);
+      expect(result.unverified_fragment_count).toBe(0);
+    });
+
+    it('verifies an href change against the stored markup', async () => {
+      const link = (url: string) => `<p><a href="${url}">link</a></p>`;
+      mockClient.getPage
+        .mockResolvedValueOnce(page({ raw_html: link('https://a.example/old') }))
+        .mockResolvedValueOnce(
+          page({ raw_html: link('https://a.example/new').replace('<p>', '<p id="bkmrk-link">') })
+        );
+      mockClient.updatePage.mockResolvedValue(page());
+
+      const result = await call<WriteResult>('bookstack_pages_edit', {
+        id: PAGE_ID,
+        edits: [
+          {
+            old_string: 'href="https://a.example/old"',
+            new_string: 'href="https://a.example/new"',
+          },
+        ],
+      });
+
+      expect(result.verified).toBe(true);
+      expect(result.unverified_fragment_count).toBe(0);
+    });
+
+    it('does not verify a formatting-only edit whose write was lost', async () => {
+      const stored = '<p><b>x</b> rest</p>';
+      mockClient.getPage
+        .mockResolvedValueOnce(page({ raw_html: stored }))
+        .mockResolvedValueOnce(page({ raw_html: stored }));
+      mockClient.updatePage.mockResolvedValue(page());
+
+      const result = await call<WriteResult>('bookstack_pages_edit', {
+        id: PAGE_ID,
+        edits: [{ old_string: '<b>x</b>', new_string: '<i>x</i>' }],
+      });
+
+      expect(result.written).toBe(true);
+      expect(result.verified).toBe(false);
+      expect(result.unverified_fragment_count).toBe(1);
+    });
+
     it('rejects an empty edit list at the schema boundary', async () => {
       await expect(
         tool('bookstack_pages_edit').handler({ id: PAGE_ID, edits: [] })
@@ -514,6 +611,73 @@ describe('PageTools partial editing', () => {
 
       expect(mockClient.updatePage).toHaveBeenCalledWith(PAGE_ID, { html: expected });
       expect(result.section).toBe('Section A');
+    });
+
+    it('reports the heading it matched, on a dry run too', async () => {
+      const withSections = '<h2>Section A</h2><p>Text</p><h2>Section B</h2><p>End</p>';
+      mockClient.getPage.mockResolvedValue(page({ raw_html: withSections }));
+
+      const result = await call<WriteResult & { section_matched: string }>(
+        'bookstack_pages_append',
+        { id: PAGE_ID, content: '<p>Added</p>', section: 'section a', dry_run: true }
+      );
+
+      expect(result.section).toBe('section a');
+      expect(result.section_matched).toBe('Section A');
+      expect(mockClient.updatePage).not.toHaveBeenCalled();
+    });
+
+    it('appends after a section heading inside a fenced code block, and after subsections', async () => {
+      const markdown =
+        '## Changelog\n\n```bash\n# comment\n```\n\n### 2026\n\nEntry\n\n## Other\n\nEnd';
+      const expected =
+        '## Changelog\n\n```bash\n# comment\n```\n\n### 2026\n\nEntry\n\nAdded\n\n## Other\n\nEnd';
+      mockClient.getPage
+        .mockResolvedValueOnce(page({ editor: 'markdown', markdown }))
+        .mockResolvedValueOnce(page({ editor: 'markdown', markdown: expected }));
+      mockClient.updatePage.mockResolvedValue(page());
+
+      const result = await call<WriteResult & { section_matched: string }>(
+        'bookstack_pages_append',
+        { id: PAGE_ID, content: 'Added', section: 'changelog' }
+      );
+
+      expect(mockClient.updatePage).toHaveBeenCalledWith(PAGE_ID, { markdown: expected });
+      expect(result.section_matched).toBe('Changelog');
+      expect(result.verified).toBe(true);
+    });
+
+    it('reports a write it could not re-read as unverified instead of throwing', async () => {
+      // Throwing here would make a retrying client append the content a second time.
+      mockClient.getPage
+        .mockResolvedValueOnce(page())
+        .mockRejectedValueOnce(new Error('rate limit retries exhausted'));
+      mockClient.updatePage.mockResolvedValue(
+        page({ updated_at: '2026-01-03T00:00:00.000000Z', revision_count: 8 })
+      );
+
+      const result = await call<WriteResult>('bookstack_pages_append', {
+        id: PAGE_ID,
+        content: '<p>New sentence</p>',
+      });
+
+      expect(mockClient.updatePage).toHaveBeenCalledTimes(1);
+      expect(result.written).toBe(true);
+      expect(result.verified).toBeNull();
+      expect(result.note).toMatch(/Do not retry/);
+      expect(result.updated_at).toBe('2026-01-03T00:00:00.000000Z');
+      expect(result.revision_count).toBe(8);
+      expect(mockLogger.warn).toHaveBeenCalled();
+    });
+
+    it('still throws when the write itself fails', async () => {
+      mockClient.getPage.mockResolvedValue(page());
+      mockClient.updatePage.mockRejectedValue(new Error('write refused'));
+
+      await expect(
+        tool('bookstack_pages_append').handler({ id: PAGE_ID, content: '<p>New sentence</p>' })
+      ).rejects.toThrow(/write refused/);
+      expect(mockClient.getPage).toHaveBeenCalledTimes(1);
     });
 
     it('fails with the available headings when the section is unknown', async () => {

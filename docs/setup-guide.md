@@ -21,7 +21,7 @@ The BookStack MCP Server provides comprehensive access to BookStack's knowledge 
 
 ### Key Features
 - **59 MCP Tools** across 13 categories, covering the supported subset of the BookStack API
-- **11 Resources** for dynamic content retrieval
+- **5 Resources and 6 Resource Templates** for dynamic content retrieval
 - **Rate Limiting** with configurable limits
 - **Comprehensive Validation** using Zod schemas
 - **Error Handling** with retry logic
@@ -197,10 +197,6 @@ VALIDATION_STRICT_MODE=true
 # Logging
 LOG_LEVEL=info
 LOG_FORMAT=pretty
-
-# Development
-NODE_ENV=development
-DEBUG=false
 ```
 
 > 💡 These are the variables the server actually reads. The full, authoritative
@@ -369,8 +365,6 @@ For production deployments:
 
 ```env
 # Production Environment Variables
-NODE_ENV=production
-DEBUG=false
 LOG_LEVEL=warn
 LOG_FORMAT=json
 
@@ -384,9 +378,12 @@ A single server process talks to exactly one BookStack instance. To cover
 several, run one server per instance with its own `BOOKSTACK_BASE_URL`,
 `BOOKSTACK_API_TOKEN`, and `SERVER_PORT`.
 
-Alternatively, in HTTP mode a single server can serve multiple instances by
-sending per-request credentials on `POST /message` with the `x-bookstack-url`
-and `x-bookstack-token` headers, which override the environment defaults.
+Alternatively, in HTTP mode a single server can serve multiple instances. List
+their API base URLs in `BOOKSTACK_ALLOWED_BASE_URLS` (comma-separated), and send
+`x-bookstack-url` together with that instance's own `x-bookstack-token` on
+`POST /message`. A URL that is not listed, or one sent without a token, is refused
+with a `400`: the configured `BOOKSTACK_API_TOKEN` is only ever sent to
+`BOOKSTACK_BASE_URL`.
 
 ## 🛠️ Development Setup
 
@@ -542,7 +539,7 @@ docker run -i --rm \
 Use `-i`, not `-it` — allocating a TTY corrupts the JSON-RPC stream that MCP
 clients pipe over stdin/stdout. No port mapping is needed in stdio mode.
 
-> ⚠️ The image's `HEALTHCHECK` probes `http://localhost:3000/health`, so a
+> ⚠️ The image's `HEALTHCHECK` probes `http://localhost:$SERVER_PORT/health` (default `3000`), so a
 > container started with `MCP_TRANSPORT=stdio` will report `unhealthy` — nothing
 > is listening on a port in stdio mode. That is expected.
 
@@ -620,8 +617,6 @@ has no stdin, so stdin hits EOF and the process exits.
 Enable debug logging:
 
 ```bash
-# Set debug environment
-export DEBUG=true
 export LOG_LEVEL=debug
 
 # Run with debug output
@@ -630,8 +625,9 @@ bun run dev
 
 ### HTTP Endpoints
 
-In HTTP mode the server exposes exactly three endpoints. Any other path returns
-a JSON `404` listing the valid ones.
+In HTTP mode the server exposes exactly three endpoints. `GET` and `DELETE` on
+`/message` answer `405` with `Allow: POST`, before authentication: the server offers
+no SSE stream and no sessions. Any other path returns a JSON `404` listing the valid ones.
 
 | Method & path | Purpose | Status codes |
 | --- | --- | --- |
@@ -644,9 +640,10 @@ inbound `Authorization: Bearer <secret>` header**, since it dispatches every too
 the HTTP transport refuses to start until a secret is configured, and its startup
 error names the exact variable to set.
 
-`POST /message` also accepts per-request credential overrides via the
-`x-bookstack-url` and `x-bookstack-token` headers, falling back to
-`BOOKSTACK_BASE_URL` / `BOOKSTACK_API_TOKEN`.
+`POST /message` also accepts per-request overrides. `x-bookstack-token` alone
+spends the caller's own token at `BOOKSTACK_BASE_URL`. `x-bookstack-url` is refused
+with a `400` unless it is listed in `BOOKSTACK_ALLOWED_BASE_URLS`, and then requires
+`x-bookstack-token` as well.
 
 ```bash
 # MCP initialize handshake — Content-Type and Accept are required by the
@@ -683,7 +680,7 @@ curl -i http://localhost:3000/health
   "checks": [
     {"name": "bookstack_connection", "healthy": true, "message": "BookStack API connection"},
     {"name": "tools_loaded", "healthy": true, "message": "59 tools loaded"},
-    {"name": "resources_loaded", "healthy": true, "message": "11 resources loaded"}
+    {"name": "resources_loaded", "healthy": true, "message": "5 resources and 6 resource templates loaded"}
   ]
 }
 ```
@@ -693,17 +690,24 @@ check failed — most often `bookstack_connection`, caused by an **invalid**
 `BOOKSTACK_API_TOKEN` (present but wrong or revoked) or an unreachable
 `BOOKSTACK_BASE_URL`.
 
-A **missing** `BOOKSTACK_API_TOKEN` never produces a `503`. The token is validated
-at startup (`z.string().min(1)`), so an empty value fails config validation before
-Express binds the port:
+A **missing** `BOOKSTACK_API_TOKEN` never produces a `503`. The configuration itself
+still loads, because OAuth mode runs without the token, but each transport refuses to
+start without it:
 
-```
-error: Configuration validation failed: bookstack.apiToken: BookStack API token is required - set BOOKSTACK_API_TOKEN environment variable
-```
+- **HTTP (token mode)** fails before Express binds the port. Stderr shows the line
+  below, the process exits with code `1`, nothing listens on `SERVER_PORT`, and `curl`
+  gets a connection refused rather than a status code.
 
-The process exits, nothing listens on `SERVER_PORT`, and `curl` gets a connection
-refused rather than a status code. Distinguishing the two saves time: **`503` = bad
-token, connection refused = no token.**
+  ```
+  Failed to start HTTP transport: Configuration validation failed: bookstack.apiToken: BookStack API token is required - set BOOKSTACK_API_TOKEN environment variable
+  ```
+
+- **stdio** prints the same reason as `Failed to start stdio transport: …` to stderr,
+  writes nothing to stdout, and exits with code `1`, so the MCP client sees the server
+  exit during startup.
+
+Distinguishing the two saves time: **`503` = bad token, connection refused = no
+token.**
 
 ### Log Analysis
 

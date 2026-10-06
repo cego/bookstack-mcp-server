@@ -29,7 +29,7 @@ The BookStack MCP Server provides comprehensive access to the BookStack knowledg
 
 ### Key Features
 
-- **API Coverage**: 59 tools and 11 resources across 13 categories, covering the supported subset of the BookStack API (comments, imports, tag listings, image-gallery `data` endpoints and ZIP export are not exposed)
+- **API Coverage**: 59 tools, 5 resources and 6 resource templates across 13 categories, covering the supported subset of the BookStack API (comments, imports, tag listings, image-gallery `data` endpoints and ZIP export are not exposed)
 - **Type Safety**: Full TypeScript interfaces for all operations
 - **Robust Error Handling**: Comprehensive error mapping and recovery guidance
 - **Rate Limiting**: Token bucket algorithm with configurable limits
@@ -77,10 +77,6 @@ VALIDATION_STRICT_MODE=true   # default: true (reject invalid params at the boun
 # Optional - Logging
 LOG_LEVEL=info      # error | warn | info | debug
 LOG_FORMAT=pretty   # pretty | json
-
-# Optional - Development
-NODE_ENV=development  # development | production | test
-DEBUG=false
 ```
 
 > The HTTP transport applies no CORS headers and no Helmet hardening. Put it
@@ -124,10 +120,6 @@ interface Config {
     level: 'error' | 'warn' | 'info' | 'debug';  // Severity threshold
     format: 'json' | 'pretty';                   // Output shape
   };
-  development: {
-    nodeEnv: 'development' | 'production' | 'test';
-    debug: boolean;
-  };
 }
 ```
 
@@ -158,17 +150,21 @@ Comprehensive error mapping from HTTP status codes to MCP errors:
 | 422 | `validation_error` | Validation failed | Check required fields and constraints |
 | 429 | `rate_limit_error` | Rate limit exceeded | Wait and retry, or reduce request frequency |
 | 500+ | `server_error` | Server-side error | Check BookStack server status |
+| — | `network_error` | BookStack could not be reached (connection refused, reset or dropped before a response) | Check BookStack is up and `BOOKSTACK_BASE_URL` is right |
+| — | `timeout_error` | BookStack did not respond within `BOOKSTACK_TIMEOUT` ms | Check BookStack load, or raise `BOOKSTACK_TIMEOUT` |
 
 ### Retry Policy
 
 Transient failures are retried automatically:
 
 - **Retryable Status Codes**: 429, 500, 502, 503, 504
+- **Retryable connection failures**: connection refused, reset or dropped before a
+  response (`network_error`). Timeouts (`timeout_error`) are never retried.
 - **Max Attempts**: 4 (the initial request plus up to 3 retries)
 - **Which requests are replayed**: a `429` is retried for **any** method — BookStack
   rejects a throttled request before it executes, so replaying it is safe. The
-  `5xx` codes are only retried for **`GET`, `HEAD` and `OPTIONS`**, because a
-  `5xx` on a write may have partially applied.
+  `5xx` codes and connection failures are only retried for **`GET`, `HEAD` and
+  `OPTIONS`**, because a write may have partially applied.
 - **Backoff**: a server-directed wait wins when present — `Retry-After`, else
   `X-RateLimit-Reset`. Otherwise exponential from 500ms, doubling to an 8s cap,
   with up to 25% jitter.
@@ -194,7 +190,7 @@ interface BooksListParams {
   offset?: number;          // Number to skip (default: 0)
   sort?: 'name' | 'created_at' | 'updated_at';  // Sort field
   filter?: {
-    name?: string;          // Partial name match
+    name?: string;          // Exact name match
     created_by?: number;    // Creator user ID
   };
 }
@@ -300,7 +296,7 @@ interface PagesListParams extends PaginationParams {
   filter?: {
     book_id?: number;      // Filter by parent book
     chapter_id?: number;   // Filter by parent chapter
-    name?: string;         // Partial name match
+    name?: string;         // Exact name match
     draft?: boolean;       // Filter by draft status
     template?: boolean;    // Filter by template status
   };
@@ -342,6 +338,10 @@ interface ReadPageOptions {
   length?: number;        // Length of that window
   metadata_only?: boolean; // Metadata and total_chars only, no content
 }
+
+// A grep response lists matches: [{ offset, match, context, context_truncated_start,
+// context_truncated_end }]. `context` is an exact slice of the stored source (no ellipses),
+// so it can be used verbatim as an edit's old_string.
 ```
 
 #### Update Page
@@ -380,14 +380,16 @@ interface EditPageParams {
 //   edits: [{ index, occurrences_replaced, context }],
 //   written, verified, unverified_fragment_count, chars_stored
 // }
+// verified is null, with a note, when the write succeeded but the page could not be
+// re-read: do not retry the write, read the page to check it.
 ```
 
-An anchor that cannot be applied comes back as `InvalidParams` with actionable
-detail rather than a bare failure: `found_with_different_whitespace` when the text
-exists but the whitespace differs, `first_occurrences` when it matched more than
-once, `chars_before`/`chars_after` when the shrink guard fired. A page that changed
-before this server read it comes back as `InvalidRequest` with
-`type: 'concurrent_modification'`.
+An anchor that cannot be applied comes back as a tool error result (`isError: true`)
+whose text carries actionable detail rather than a bare failure:
+`found_with_different_whitespace` when the text exists but the whitespace differs,
+`first_occurrences` when it matched more than once, `chars_before`/`chars_after` when
+the shrink guard fired. A page that changed before this server read it comes back the
+same way with `type: 'concurrent_modification'`.
 
 #### Append to Page
 ```typescript
@@ -403,7 +405,11 @@ interface AppendPageParams {
 }
 ```
 
-An unknown `section` fails with `available_sections` listing the real heading names.
+An exact heading match (trimmed, case-insensitive) wins; otherwise a substring is accepted
+only if exactly one heading contains it. An unknown `section` fails with `available_sections`
+listing the real heading names, an ambiguous one with `matching_sections`. A section ends at
+the next heading of the same or a higher level, so `end` lands after its subsections. The
+response, dry runs included, reports the heading used as `section_matched`.
 
 #### Outline Page
 ```typescript
@@ -412,7 +418,7 @@ An unknown `section` fails with `available_sections` listing the real heading na
 // {
 //   page_id, name, slug, book_id, chapter_id, updated_at, revision_count,
 //   editor, field, total_chars, heading_count,
-//   headings: [{ level, text, offset, length }]   // length = section size
+//   headings: [{ level, text, offset, length }]   // length = section size, subsections included
 // }
 ```
 
@@ -438,7 +444,7 @@ Chapters organize pages within books.
 interface ChaptersListParams extends PaginationParams {
   filter?: {
     book_id?: number;      // Filter by parent book
-    name?: string;         // Partial name match
+    name?: string;         // Exact name match
     created_by?: number;   // Creator user ID
   };
 }
@@ -493,7 +499,7 @@ Bookshelves organize books into collections.
 // Tool: bookstack_shelves_list
 interface ShelvesListParams extends PaginationParams {
   filter?: {
-    name?: string;         // Partial name match
+    name?: string;         // Exact name match
     created_by?: number;   // Creator user ID
   };
 }
@@ -541,7 +547,7 @@ User management operations (requires admin permissions).
 // Tool: bookstack_users_list
 interface UsersListParams extends PaginationParams {
   filter?: {
-    name?: string;     // Partial name match
+    name?: string;     // Exact name match
     email?: string;    // Partial email match
     active?: boolean;  // Filter by active status
   };
@@ -658,7 +664,7 @@ File attachments for pages.
 // Tool: bookstack_attachments_list
 interface AttachmentsListParams extends PaginationParams {
   filter?: {
-    name?: string;         // Partial name match
+    name?: string;         // Exact name match
     uploaded_to?: number;  // Page ID filter
     extension?: string;    // File extension filter
   };
@@ -723,7 +729,7 @@ Image gallery management.
 // Tool: bookstack_images_list
 interface ImageGalleryListParams extends PaginationParams {
   filter?: {
-    name?: string;                    // Partial name match
+    name?: string;                    // Exact name match
     type?: 'gallery' | 'drawio';     // Image type filter
     uploaded_to?: number;            // Page association filter
   };
@@ -1083,7 +1089,7 @@ interface PaginationParams {
 }
 
 interface FilterParams {
-  name?: string;      // Name filter (partial match)
+  name?: string;      // Name filter (exact match)
   created_by?: number;// Creator filter
   // ... other entity-specific filters
 }
@@ -1092,6 +1098,11 @@ interface FilterParams {
 ## Error Codes
 
 ### MCP Error Codes
+
+A failed tool call is not a JSON-RPC error: it returns a `tools/call` result with
+`isError: true`, whose text gives the message and then the details as JSON (`type`,
+`validation`, `status`, `details` and any recovery hints). The codes below apply to the
+protocol errors that remain: an unknown tool name and a failed `resources/read`.
 
 | Code | Type | Description | HTTP Status |
 |------|------|-------------|-------------|

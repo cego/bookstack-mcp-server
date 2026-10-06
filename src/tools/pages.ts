@@ -35,6 +35,11 @@ import type {
 /** The whole `bookstack_pages_update` request: the page to update, plus the changes. */
 type UpdatePageRequest = UpdatePageParams & IdRequest;
 
+/** Collapse whitespace runs, which BookStack may reflow when it stores a page. */
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
 /** What a post-write read must prove without requiring byte-identical HTML. */
 interface WriteVerification {
   mustContain: string[];
@@ -384,7 +389,7 @@ export class PageTools {
             minLength: 1,
             maxLength: 1000,
             description:
-              'Literal text to search for in the STORED page source. Returns matching excerpts with surrounding context instead of the whole page. Regex syntax is treated literally, so searching the stored source (not the rendered HTML) makes a returned excerpt usable verbatim as an `old_string` anchor.',
+              "Literal text to search for in the STORED page source. Returns matching excerpts instead of the whole page; regex syntax is treated literally. Each match's `context` is an exact slice of the stored source with no ellipses (`context_truncated_start`/`context_truncated_end` say where the page continues), so it can be pasted verbatim as an `old_string` anchor.",
           },
           case_sensitive: {
             type: 'boolean',
@@ -450,7 +455,7 @@ export class PageTools {
       usage_patterns: [
         'Use this to get the "before" state of content when performing updates',
         'Useful for answering questions based on specific documentation',
-        'On a large page, run `grep` first and pass the returned excerpt to bookstack_pages_edit as `old_string` - that avoids sending the page through the model twice',
+        "On a large page, run `grep` first and pass a match's `context` (or a unique part of it) to bookstack_pages_edit as `old_string` - that avoids sending the page through the model twice",
         'A call with none of the narrowing options behaves exactly as before and returns the whole page',
       ],
       related_tools: [
@@ -734,7 +739,7 @@ export class PageTools {
         },
       ],
       usage_patterns: [
-        'Locate the text first: bookstack_pages_read with `grep` returns excerpts you can paste straight into old_string',
+        'Locate the text first: each bookstack_pages_read `grep` match carries an exact `context` you can paste straight into old_string',
         'Run with dry_run: true first on anything non-trivial - it costs no write and proves the anchors resolve',
         'Pass expected_updated_at from the read that produced your anchors to catch a page that was already stale when this server read it; BookStack cannot make this a race-free lock',
         'BookStack keeps a revision per write, so an applied edit can be rolled back in the UI',
@@ -822,7 +827,6 @@ export class PageTools {
                 // edit landed, including markup-only fragments omitted by text normalisation.
                 const normalized = normalizeForComparison(edit.new_string, source.writeField);
                 if (normalized.length === 0) {
-                  const collapseWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
                   return collapseWhitespace(source.source).includes(
                     collapseWhitespace(edit.new_string)
                   );
@@ -843,7 +847,7 @@ export class PageTools {
     return {
       name: 'bookstack_pages_append',
       description:
-        'Add content to a page without resending the existing content. Appends to the end of the page by default, or to the end of a named section, or directly after a section heading with `position: "start"`.\n\nSection names come from `bookstack_pages_outline`; matching is case-insensitive and falls back to a substring match. The response never contains the page content.',
+        'Add content to a page without resending the existing content. Appends to the end of the page by default, or to the end of a named section, or directly after a section heading with `position: "start"`.\n\nSection names come from `bookstack_pages_outline`. An exact heading match (trimmed, case-insensitive) wins; otherwise a substring is accepted only if exactly one heading contains it. A section runs to the next heading of the same or a higher level, so "end" lands after its subsections. The response reports the heading used as `section_matched` and never contains the page content.',
       category: 'pages',
       inputSchema: {
         type: 'object',
@@ -871,7 +875,7 @@ export class PageTools {
             type: 'string',
             minLength: 1,
             description:
-              'Heading text of the section to insert into. Omit to target the whole page. If no heading matches, the error lists the available section names.',
+              'Heading text of the section to insert into. Omit to target the whole page. If no heading matches, the error lists the available section names; if several match, it lists those.',
           },
           separator: {
             type: 'string',
@@ -905,23 +909,24 @@ export class PageTools {
             section: 'Change log',
             content: '<p>2026-08-17: retention extended.</p>',
           },
-          expected_output: 'Summary naming the section that was appended to',
+          expected_output: 'Summary whose section_matched names the heading that was appended to',
           use_case: 'Maintaining a log section in a long document',
         },
       ],
       usage_patterns: [
         'Call bookstack_pages_outline first to get exact section names and see which editor the page uses',
         'Match the page format: HTML for a wysiwyg page, Markdown for a markdown page - mixing them produces visible markup',
-        'Use position: "start" to introduce a section, "end" to add to it',
+        'Use position: "start" to introduce a section, "end" to add to it (after its subsections)',
+        'Check section_matched in the response, dry_run included, to confirm which heading was used',
         'This never rewrites existing content, so it is the safe choice for adding to a page you have not read',
       ],
       related_tools: ['bookstack_pages_outline', 'bookstack_pages_edit', 'bookstack_pages_read'],
       error_codes: [
         {
           code: 'INVALID_PARAMS',
-          description: 'The named section does not exist',
+          description: 'The named section does not exist, or matches more than one heading',
           recovery_suggestion:
-            'The error details list the available section names; use one of those or omit `section` to append to the page',
+            'The error details list the available or the matching section names; pass the full text of one of those, or omit `section` to append to the page',
         },
         {
           code: 'INVALID_REQUEST',
@@ -942,7 +947,7 @@ export class PageTools {
         this.assertNotStale(page, options.expected_updated_at);
 
         const source = selectSource(page);
-        const result = insertContent(source.source, options.content, {
+        const { result, heading } = insertContent(source.source, options.content, {
           position: options.position,
           ...(options.section !== undefined ? { section: options.section } : {}),
           ...(options.separator !== undefined ? { separator: options.separator } : {}),
@@ -955,6 +960,7 @@ export class PageTools {
           field: source.writeField,
           position: options.position,
           section: options.section ?? null,
+          section_matched: heading?.text ?? null,
           chars_before: source.source.length,
           chars_after: result.length,
           delta: result.length - source.source.length,
@@ -1013,7 +1019,7 @@ export class PageTools {
       ],
       usage_patterns: [
         'Run this before bookstack_pages_append to get exact section names',
-        'The `length` of a heading is the size of its section, which shows where the content actually sits',
+        'The `length` of a heading is the size of its section, subsections included, which shows where the content actually sits',
         'Check `editor` before writing: it decides whether content must be HTML or Markdown',
         'A page with no headings returns an empty array - that is not an error',
       ],
@@ -1089,10 +1095,13 @@ export class PageTools {
    *
    * The re-read is not paranoia about the network - it is about BookStack rewriting what it
    * stores. On save it re-generates heading anchors and injects `id` attributes, so the bytes
-   * that come back are not the bytes that were sent. Verification therefore compares
-   * NORMALISED text (see containsNormalized), and a fragment that cannot be found is reported
-   * as `verified: false` rather than thrown: the write did happen, and the caller needs to
-   * know both facts.
+   * that come back are not always the bytes that were sent. Each fragment is therefore looked
+   * for in the raw stored source first and in NORMALISED text second (see
+   * normalizeForComparison). A fragment that cannot be found is reported as `verified: false`
+   * rather than thrown: the write did happen, and the caller needs to know both facts.
+   *
+   * Only a failed PUT throws. If the re-read fails after a successful PUT, the result is
+   * `verified: null`: throwing there would invite a retry that applies the change twice.
    */
   private async writeAndVerify(
     page: PageWithContent,
@@ -1100,29 +1109,48 @@ export class PageTools {
     result: string,
     verification: WriteVerification
   ): Promise<Record<string, unknown>> {
-    await this.client.updatePage(page.id, { [source.writeField]: result });
+    const put = await this.client.updatePage(page.id, { [source.writeField]: result });
 
-    const written = await this.client.getPage(page.id);
+    let written: PageWithContent;
+    try {
+      written = await this.client.getPage(page.id);
+    } catch (error) {
+      this.logger.warn('Page written but not re-read for verification', {
+        page_id: page.id,
+        err: error,
+      });
+      return {
+        written: true,
+        verified: null,
+        note: 'The page was written but could not be re-read to verify it. Do not retry the write; read the page to check it.',
+        updated_at: put.updated_at,
+        revision_count: put.revision_count,
+      };
+    }
+
     const writtenSource = selectSource(written);
-    const missing = verification.mustContain.filter((fragment) => {
-      const normalized = normalizeForComparison(fragment, writtenSource.writeField);
-      if (normalized.length === 0) {
-        // HTML-to-text intentionally removes markup-only fragments (`<hr>`, `<img>`, etc.).
-        // They still need a structural post-write check, otherwise a stored fragment would be
-        // reported as missing forever; collapse formatting whitespace but require the literal
-        // markup to remain present.
-        const collapseWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
-        return !collapseWhitespace(writtenSource.source).includes(collapseWhitespace(fragment));
-      }
-      return !containsNormalized(writtenSource.source, fragment, writtenSource.writeField);
+    const field = writtenSource.writeField;
+    const storedRaw = collapseWhitespace(writtenSource.source);
+    const storedText = normalizeForComparison(writtenSource.source, field);
+    const sentRaw = collapseWhitespace(result);
+    const sentText = normalizeForComparison(result, field);
+    // A markup-only fragment (`<hr>`) has empty text, so only the raw check can see it.
+    const forms = (fragment: string) => ({
+      raw: collapseWhitespace(fragment),
+      text: normalizeForComparison(fragment, field),
     });
-    // An empty replacement deletes its old anchor. An empty normalised anchor cannot be
-    // meaningfully searched for, so treat it as unverified rather than claiming success.
+
+    const missing = verification.mustContain.filter((fragment) => {
+      const { raw, text } = forms(fragment);
+      return !storedRaw.includes(raw) && !(text.length > 0 && storedText.includes(text));
+    });
+    // Survived: stored in a form the sent result lacks. Whitespace-only anchors stay unverified.
     const stillPresent = verification.mustNotContain.filter((fragment) => {
-      const normalized = normalizeForComparison(fragment, writtenSource.writeField);
+      const { raw, text } = forms(fragment);
       return (
-        normalized.length === 0 ||
-        containsNormalized(writtenSource.source, fragment, writtenSource.writeField)
+        raw.length === 0 ||
+        (storedRaw.includes(raw) && !sentRaw.includes(raw)) ||
+        (text.length > 0 && storedText.includes(text) && !sentText.includes(text))
       );
     });
     const unverifiedCount = missing.length + stillPresent.length;

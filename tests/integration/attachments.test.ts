@@ -250,7 +250,6 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
       // which is what lets the rejection tests assert on a real failure.
       validation: { enabled: true, strictMode: true },
       logging: { level: 'error', format: 'json' },
-      development: { nodeEnv: 'test', debug: false },
     };
     const client = new BookStackClient(config, logger, new ErrorHandler(logger));
     attachmentTools = new AttachmentTools(
@@ -552,10 +551,10 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
 
     /** file_path over the multipart-update path (`POST` + `_method=PUT`). */
     it(
-      'replaces content from a file_path under the stdio transport',
+      'replaces content from a file_path inside BOOKSTACK_UPLOAD_ROOT under the stdio transport',
       async () => {
         setGuardEnv('MCP_TRANSPORT', 'stdio');
-        setGuardEnv('BOOKSTACK_UPLOAD_ROOT', undefined);
+        setGuardEnv('BOOKSTACK_UPLOAD_ROOT', uploadRoot);
 
         const name = `${uniqueName('itest-att-stdio')}.txt`;
         const original = payloadBytes('stdio-v1');
@@ -577,28 +576,31 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
     );
 
     it(
-      'refuses file_path over a remote-capable transport without BOOKSTACK_UPLOAD_ROOT',
+      'refuses file_path without BOOKSTACK_UPLOAD_ROOT under stdio and http alike',
       async () => {
-        setGuardEnv('MCP_TRANSPORT', 'http');
         setGuardEnv('BOOKSTACK_UPLOAD_ROOT', undefined);
 
-        const name = `${uniqueName('itest-att-refused')}.txt`;
-        const filePath = join(uploadRoot, name);
-        await writeFile(filePath, payloadBytes('refused'));
+        for (const transport of ['stdio', 'http']) {
+          setGuardEnv('MCP_TRANSPORT', transport);
 
-        await expect(
-          runTool('bookstack_attachments_create', {
-            uploaded_to: pageId,
-            name,
-            file_path: filePath,
-          })
-        ).rejects.toThrow(/'file_path' is refused under the 'http' transport/);
+          const name = `${uniqueName('itest-att-refused')}.txt`;
+          const filePath = join(uploadRoot, name);
+          await writeFile(filePath, payloadBytes('refused'));
 
-        // Refusal is real, not cosmetic: nothing reached the page.
-        const listed = (await runTool('bookstack_attachments_list', {
-          filter: { uploaded_to: pageId, name },
-        })) as ListResponse<Attachment>;
-        expect(listed.data).toEqual([]);
+          await expect(
+            runTool('bookstack_attachments_create', {
+              uploaded_to: pageId,
+              name,
+              file_path: filePath,
+            })
+          ).rejects.toThrow(/BOOKSTACK_UPLOAD_ROOT is not set/);
+
+          // Refusal is real, not cosmetic: nothing reached the page.
+          const listed = (await runTool('bookstack_attachments_list', {
+            filter: { uploaded_to: pageId, name },
+          })) as ListResponse<Attachment>;
+          expect(listed.data).toEqual([]);
+        }
       },
       TEST_TIMEOUT_MS
     );
@@ -624,7 +626,7 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
             name,
             file_path: traversal,
           })
-        ).rejects.toThrow(/which is outside BOOKSTACK_UPLOAD_ROOT/);
+        ).rejects.toThrow(/must name a readable file inside BOOKSTACK_UPLOAD_ROOT/);
 
         const listed = (await runTool('bookstack_attachments_list', {
           filter: { uploaded_to: pageId, name },
@@ -713,8 +715,9 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
       it(
         `rejects create with ${sources.join(' + ')}, naming what collided`,
         async () => {
-          // stdio, so file_path is an allowed source and cannot be what fails.
+          // file_path sits inside BOOKSTACK_UPLOAD_ROOT, so it cannot be what fails.
           setGuardEnv('MCP_TRANSPORT', 'stdio');
+          setGuardEnv('BOOKSTACK_UPLOAD_ROOT', uploadRoot);
 
           const name = `${uniqueName('itest-att-excl-create')}.txt`;
           const params = await sourceParams(sources, 'excl-create');
@@ -763,6 +766,7 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
         `rejects update with ${sources.join(' + ')}, leaving the stored file intact`,
         async () => {
           setGuardEnv('MCP_TRANSPORT', 'stdio');
+          setGuardEnv('BOOKSTACK_UPLOAD_ROOT', uploadRoot);
 
           const name = `${uniqueName('itest-att-excl-update')}.txt`;
           const original = payloadBytes('excl-update-original');

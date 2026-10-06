@@ -1,11 +1,11 @@
 /**
- * Integration tests for all 11 MCP resources against a live BookStack.
+ * Integration tests for all 5 MCP resources and 6 resource templates against a live BookStack.
  *
  * Resources are the read-only half of the MCP surface (distinct from tools):
- * six classes under src/resources/ expose 11 URIs, five of them templated with
- * an `{id}`. This suite constructs every class with a real BookStackClient and
- * Logger, then drives each handler with a concrete URI and asserts on real data
- * returned by the live API.
+ * six classes under src/resources/ expose 11 URIs, six of them templates (five with an
+ * `{id}`, search with a `{query}`). This suite constructs every class with a real
+ * BookStackClient and Logger, then drives each handler with a concrete URI and asserts on
+ * real data returned by the live API.
  *
  * Isolation: the instance is shared with other suites running right now, so the
  * list resources (`bookstack://books` and friends return *everything*) are only
@@ -82,7 +82,6 @@ function makeConfig(harness: BookStackHarness): Config {
     rateLimit: { requestsPerMinute: 600, burstLimit: 50 },
     validation: { enabled: true, strictMode: false },
     logging: { level: 'error', format: 'json' },
-    development: { nodeEnv: 'test', debug: false },
   };
 }
 
@@ -202,7 +201,7 @@ describe.skipIf(!runIntegration)('MCP resources against live BookStack', () => {
     await cleanup.run(harness);
   }, 60_000);
 
-  it('registers all 11 resources with declared metadata', () => {
+  it('registers all 5 resources and 6 resource templates with declared metadata', () => {
     expect(resources).toHaveLength(EXPECTED_URIS.length);
     expect(resources.map((resource) => resource.uri).sort()).toEqual([...EXPECTED_URIS].sort());
 

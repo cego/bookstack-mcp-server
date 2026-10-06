@@ -25,6 +25,7 @@ import {
   buildOutline,
   containsNormalized,
   countOccurrences,
+  findSection,
   grepContent,
   insertContent,
   PageContentError,
@@ -236,6 +237,150 @@ describe('buildOutline', () => {
   it('returns an empty outline for a page without headings', () => {
     expect(buildOutline('<p>Just a paragraph</p>', 'html')).toEqual([]);
   });
+
+  it('keeps the markdown heading rules for closing hashes, blank titles and line breaks', () => {
+    const markdown = [
+      '# Title ##',
+      '## ###',
+      '####### seven',
+      '#nospace',
+      '#  ',
+      '# ',
+      '# a #b',
+      '#\tTab title\t#',
+      '### foo# ',
+    ].join('\n');
+
+    expect(
+      buildOutline(markdown, 'markdown').map(({ level, text, offset }) => [level, text, offset])
+    ).toEqual([
+      [1, 'Title', 0],
+      [2, '#', 11],
+      [1, '', 41],
+      [1, 'a #b', 48],
+      [1, 'Tab title', 55],
+      [3, 'foo#', 69],
+    ]);
+    expect(
+      buildOutline('a\r# CR heading\r\n## CRLF\u2028### LS', 'markdown').map(({ text, offset }) => [
+        text,
+        offset,
+      ])
+    ).toEqual([
+      ['CR heading', 2],
+      ['CRLF', 16],
+      ['LS', 24],
+    ]);
+  });
+
+  it('ignores heading-like lines inside fenced code blocks', () => {
+    const markdown = [
+      '# Install',
+      '```bash',
+      '# not a heading',
+      '```',
+      '  ~~~~',
+      '## inside a tilde fence',
+      '~~~',
+      '```',
+      '~~~~',
+      '## Usage',
+      '````',
+      '```',
+      '# a shorter fence does not close it',
+      '````',
+      '    ```',
+      '## After an indented fence-lookalike',
+      '``` a`b',
+      '## After a backtick fence with a backtick in its info string',
+      '~~~',
+      '# an unclosed fence runs to the end',
+    ].join('\n');
+
+    expect(buildOutline(markdown, 'markdown').map(({ text }) => text)).toEqual([
+      'Install',
+      'Usage',
+      'After an indented fence-lookalike',
+      'After a backtick fence with a backtick in its info string',
+    ]);
+  });
+
+  it('only maps html headings closed by their own level', () => {
+    const html = '<h1>One</h2><h2 class="x">Two</H2><h3>never closed<h12>no</h12><H4>Four</h4>';
+
+    expect(
+      buildOutline(html, 'html').map(({ level, text, offset }) => [level, text, offset])
+    ).toEqual([
+      [2, 'Two', 12],
+      [4, 'Four', 63],
+    ]);
+  });
+});
+
+/**
+ * Inputs that each blocked the event loop for seconds when outlining and comparison used
+ * backtracking regular expressions. Every case must now finish well inside the budget.
+ */
+describe('pathological page content', () => {
+  const BUDGET_MS = 200;
+
+  function elapsedMs(work: () => unknown): number {
+    const startedAt = performance.now();
+    work();
+    return performance.now() - startedAt;
+  }
+
+  it('outlines a markdown heading padded with tens of thousands of blanks', () => {
+    for (const source of [`# a${' '.repeat(40_000)}x`, `# a${' \t'.repeat(20_000)}x\n## b`]) {
+      expect(elapsedMs(() => buildOutline(source, 'markdown'))).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it('outlines markdown made of long fence runs', () => {
+    for (const source of ['`'.repeat(80_000), '```\n'.repeat(20_000), `~~~${'`'.repeat(80_000)}`]) {
+      expect(elapsedMs(() => buildOutline(source, 'markdown'))).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it('outlines html made of unterminated heading tags', () => {
+    for (const source of ['<h1'.repeat(20_000), '<h1>'.repeat(20_000), '<h1 '.repeat(20_000)]) {
+      expect(elapsedMs(() => buildOutline(source, 'html'))).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it('normalises a long run of unmatched "<" for comparison', () => {
+    const stray = '<'.repeat(80_000);
+
+    expect(elapsedMs(() => containsNormalized(stray, 'x', 'html'))).toBeLessThan(BUDGET_MS);
+  });
+
+  it('bounds the whitespace-tolerant search for a long anchor', () => {
+    const page = 'word '.repeat(20_000);
+    const anchor = `${'word  '.repeat(10_000)}missing`;
+
+    let error: unknown;
+    const ms = elapsedMs(() => {
+      error = thrownBy(() => applyEdits(page, [{ old_string: anchor, new_string: 'x' }]));
+    });
+
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect((error as PageContentError).details?.found_with_different_whitespace).toBeNull();
+  });
+
+  it('still finds an anchor of up to 256 words with different whitespace', () => {
+    const words = (count: number) => Array.from({ length: count }, (_, i) => `w${i}`);
+    const report = (count: number) =>
+      (
+        thrownBy(() =>
+          applyEdits(words(count).join('\n  '), [
+            { old_string: words(count).join(' '), new_string: 'x' },
+          ])
+        ) as PageContentError
+      ).details?.found_with_different_whitespace;
+
+    expect(report(256)).toStartWith('w0\n  w1\n  w2');
+    expect(report(257)).toBeNull();
+  });
 });
 
 describe('grepContent', () => {
@@ -248,6 +393,34 @@ describe('grepContent', () => {
     expect(truncated).toBe(false);
     expect(matches[0].match).toBe('Line one');
     expect(matches[0].offset).toBe(source.indexOf('Line one'));
+  });
+
+  it('returns an exact context, bounded on each side of the match, with truncation flags', () => {
+    const page = `${'a'.repeat(50)}<p>retention period of 6 months</p>${'z'.repeat(50)}`;
+
+    const [clipped] = grepContent(page, 'retention period of 6 months', {
+      contextChars: 5,
+    }).matches;
+    const [whole] = grepContent(page, 'retention period', { contextChars: 500 }).matches;
+
+    // No ellipses: the excerpt must be pasteable as an old_string anchor.
+    expect(clipped).toMatchObject({
+      context: 'aa<p>retention period of 6 months</p>z',
+      context_truncated_start: true,
+      context_truncated_end: true,
+    });
+    expect(whole).toMatchObject({
+      context: page,
+      context_truncated_start: false,
+      context_truncated_end: false,
+    });
+  });
+
+  it('never cuts a surrogate pair at the edge of the context', () => {
+    const source = '\u{1F600}x\u{1F600}';
+
+    expect(grepContent(source, 'x', { contextChars: 1 }).matches[0].context).toBe('x');
+    expect(grepContent(source, 'x', { contextChars: 2 }).matches[0].context).toBe(source);
   });
 
   it('honours maxMatches while still reporting the true total', () => {
@@ -274,6 +447,8 @@ describe('grepContent', () => {
         offset: 1,
         match: 'retention period',
         context: unicodeSource,
+        context_truncated_start: false,
+        context_truncated_end: false,
       },
     ]);
   });
@@ -295,7 +470,7 @@ describe('insertContent', () => {
   const markdown = '# Title\n\nIntro\n\n## Measures\n\nExisting text\n\n## Other\n\nEnd';
 
   it('appends at the end of the page', () => {
-    const result = insertContent(markdown, 'New sentence', { writeField: 'markdown' });
+    const { result } = insertContent(markdown, 'New sentence', { writeField: 'markdown' });
 
     expect(result.endsWith('End\n\nNew sentence')).toBe(true);
   });
@@ -303,7 +478,7 @@ describe('insertContent', () => {
   it('appends at the end of a named section, before the next heading', () => {
     // Section targeting only works if the text lands inside the section it was addressed to,
     // instead of being pushed past its boundary into the following one.
-    const result = insertContent(markdown, 'New sentence', {
+    const { result } = insertContent(markdown, 'New sentence', {
       writeField: 'markdown',
       section: 'Measures',
     });
@@ -312,7 +487,7 @@ describe('insertContent', () => {
   });
 
   it('inserts directly after a section heading with position: start', () => {
-    const result = insertContent(markdown, 'New sentence', {
+    const { result } = insertContent(markdown, 'New sentence', {
       writeField: 'markdown',
       section: 'Measures',
       position: 'start',
@@ -323,7 +498,7 @@ describe('insertContent', () => {
 
   it('inserts after an html section heading', () => {
     const html = '<h2 id="bkmrk-m">Measures</h2><p>Old</p><h2>Other</h2><p>End</p>';
-    const result = insertContent(html, '<p>New</p>', {
+    const { result } = insertContent(html, '<p>New</p>', {
       writeField: 'html',
       section: 'Measures',
       position: 'start',
@@ -334,12 +509,94 @@ describe('insertContent', () => {
   });
 
   it('matches a section name case-insensitively', () => {
-    const result = insertContent(markdown, 'New sentence', {
+    const { result } = insertContent(markdown, 'New sentence', {
       writeField: 'markdown',
       section: 'measures',
     });
 
     expect(result).toContain('Existing text\n\nNew sentence');
+  });
+
+  it('appends to a section after its code block, not inside it', () => {
+    const source = '# Install\n\n```bash\n# comment\nnpm install\n```\n\n# Usage\n\nRun it';
+
+    const { result } = insertContent(source, 'Then restart.', {
+      writeField: 'markdown',
+      section: 'Install',
+    });
+
+    expect(result).toBe(
+      '# Install\n\n```bash\n# comment\nnpm install\n```\n\nThen restart.\n\n# Usage\n\nRun it'
+    );
+  });
+
+  describe('section boundaries and matching', () => {
+    const changelog = [
+      '# Doc',
+      '## Changelog',
+      'Intro',
+      '### 2026',
+      'Entry A',
+      '### 2025',
+      'Entry B',
+      '## Other',
+      'End',
+    ].join('\n');
+
+    it('ends a section at the next heading of the same or higher level', () => {
+      const { result } = insertContent(changelog, 'Entry C', {
+        writeField: 'markdown',
+        section: 'Changelog',
+        separator: '\n',
+      });
+
+      expect(result).toContain('### 2025\nEntry B\nEntry C\n## Other');
+    });
+
+    it('sizes an outline section to include its subsections', () => {
+      const headings = buildOutline(changelog, 'markdown');
+      const section = headings.find((heading) => heading.text === 'Changelog');
+      const other = headings.find((heading) => heading.text === 'Other');
+
+      expect((section?.offset ?? 0) + (section?.length ?? 0)).toBe(other?.offset ?? -1);
+      expect(headings.at(-1)?.text).toBe('Other');
+      expect(headings[0].length).toBe(changelog.length);
+    });
+
+    it('prefers an exact heading over headings that merely contain the name', () => {
+      const source = '# Setup notes\n\nA\n\n# Setup\n\nB';
+
+      expect(findSection(source, ' setup ', 'markdown').text).toBe('Setup');
+    });
+
+    it('accepts a substring that matches exactly one heading', () => {
+      const source = '# Setup notes\n\nA\n\n# Usage\n\nB';
+
+      expect(findSection(source, 'notes', 'markdown').text).toBe('Setup notes');
+    });
+
+    it('refuses a name several headings match, and lists them', () => {
+      const source = '# Install on Linux\n\nA\n\n# Install on macOS\n\nB\n\n# Usage\n\nC';
+
+      const error = thrownBy(() => findSection(source, 'install', 'markdown'));
+
+      expect(error).toBeInstanceOf(PageContentError);
+      expect((error as PageContentError).details?.matching_sections).toEqual([
+        'Install on Linux',
+        'Install on macOS',
+      ]);
+    });
+
+    it('refuses a name two identical headings share', () => {
+      const error = thrownBy(() =>
+        insertContent('## Notes\n\nA\n\n## Notes\n\nB', 'x', {
+          writeField: 'markdown',
+          section: 'notes',
+        })
+      );
+
+      expect((error as PageContentError).details?.matching_sections).toEqual(['Notes', 'Notes']);
+    });
   });
 
   it('lists the real section names when the section is unknown', () => {

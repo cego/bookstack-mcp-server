@@ -11,8 +11,56 @@ interface ErrorLike {
   isAxiosError?: boolean;
   name?: string;
   message?: string;
-  stack?: string;
   response?: { status?: number; headers?: unknown };
+}
+
+/** Axios timeout codes: ECONNABORTED by default, ETIMEDOUT with `clarifyTimeoutError`. */
+const TIMEOUT_ERROR_CODES: readonly string[] = ['ECONNABORTED', 'ETIMEDOUT'];
+
+/** Codes that mean the connection failed before any response arrived. */
+const CONNECTION_ERROR_CODES: readonly string[] = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE'];
+
+/** Codes raised without a response that are not upstream failures. */
+const NON_TRANSPORT_ERROR_CODES: readonly string[] = [
+  'ERR_CANCELED',
+  'ERR_BAD_OPTION',
+  'ERR_BAD_OPTION_VALUE',
+  'ERR_INVALID_URL',
+  'ERR_NOT_SUPPORT',
+];
+
+/** Caller-facing message for a connection-level failure; names no host. */
+export const NETWORK_ERROR_MESSAGE = 'BookStack could not be reached';
+
+/** Caller-facing message for a request that ran out of time; names no host. */
+function timeoutMessage(timeoutMs: unknown): string {
+  return typeof timeoutMs === 'number' && timeoutMs > 0
+    ? `BookStack did not respond within ${timeoutMs} ms`
+    : 'BookStack did not respond in time';
+}
+
+/** Classify an axios failure with no response: `timeout`, `network` (sent but unanswered), or neither. */
+function transportFailure(error: AxiosError): 'timeout' | 'network' | undefined {
+  if (error.response !== undefined) {
+    return undefined;
+  }
+  const code = typeof error.code === 'string' ? error.code : '';
+  if (TIMEOUT_ERROR_CODES.includes(code)) {
+    return 'timeout';
+  }
+  if (NON_TRANSPORT_ERROR_CODES.includes(code)) {
+    return undefined;
+  }
+  if (
+    CONNECTION_ERROR_CODES.includes(code) ||
+    code.startsWith('ERR_SOCKET_') ||
+    code === 'ERR_NETWORK' ||
+    /socket hang up/i.test(error.message ?? '') ||
+    error.request !== undefined
+  ) {
+    return 'network';
+  }
+  return undefined;
 }
 
 /**
@@ -39,11 +87,35 @@ export interface RetryInfo {
   method?: string;
   retryAfterMs?: number;
   rateLimitRemaining?: number;
+  /** The connection failed before any response, so the request may never have arrived. */
+  connectionFailed?: boolean;
 }
 
 /** Narrow an unknown value to an indexable object without asserting `any`. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+/** A failed tool call as MCP returns it: a result the model can read, not a protocol error. */
+export interface ToolErrorResult {
+  [key: string]: unknown;
+  isError: true;
+  content: Array<{ type: 'text'; text: string }>;
+}
+
+/** The `MCP error <code>: ` prefix McpError puts in front of its message. */
+const MCP_ERROR_PREFIX = /^MCP error -?\d+: /;
+
+/** McpError data as indented JSON, without stack frames or the upstream request path. */
+function toolErrorHints(data: unknown): string | undefined {
+  if (!isRecord(data)) {
+    return undefined;
+  }
+  const { url: _requestPath, ...hints } = data;
+  if (Object.keys(hints).length === 0) {
+    return undefined;
+  }
+  return JSON.stringify(hints, (key, value) => (key === 'stack' ? undefined : value), 2);
 }
 
 /**
@@ -155,10 +227,16 @@ export class ErrorHandler {
    */
   handleAxiosError(error: AxiosError): McpError {
     const status = error.response?.status;
-    const mapping = this.errorMappings[status as keyof typeof this.errorMappings] || {
-      type: 'unknown_error',
-      message: 'Unknown error occurred',
-    };
+    const failure = transportFailure(error);
+    const mapping =
+      failure === 'timeout'
+        ? { type: 'timeout_error', message: timeoutMessage(error.config?.timeout) }
+        : failure === 'network'
+          ? { type: 'network_error', message: NETWORK_ERROR_MESSAGE }
+          : this.errorMappings[status as keyof typeof this.errorMappings] || {
+              type: 'unknown_error',
+              message: 'Unknown error occurred',
+            };
 
     // The client's response interceptor converts every AxiosError into an McpError before
     // request() ever sees it, so the retry hints must be carried across on the McpError -
@@ -237,13 +315,12 @@ export class ErrorHandler {
       });
     }
 
-    // Handle generic errors
+    // Handle generic errors. No `stack` in `data`: it goes to the caller, the frames go to the log.
     const mcpError = new McpError(
       ErrorCode.InternalError,
       err.message || 'An unexpected error occurred',
       {
         type: 'internal_error',
-        stack: err.stack,
       }
     );
 
@@ -257,6 +334,17 @@ export class ErrorHandler {
     this.logger.error('Generic error handled', { err: error });
 
     return mcpError;
+  }
+
+  /** A tool failure as an `isError` result: the message, then the McpError data as JSON. */
+  toToolErrorResult(error: unknown): ToolErrorResult {
+    const handled = this.handleError(error);
+    const message = handled.message.replace(MCP_ERROR_PREFIX, '');
+    const hints = toolErrorHints(handled.data);
+    return {
+      isError: true,
+      content: [{ type: 'text', text: hints ? `${message}\n\n${hints}` : message }],
+    };
   }
 
   /**
@@ -328,7 +416,7 @@ export class ErrorHandler {
       }
 
       const info: RetryInfo = {};
-      const { status, method, retryAfterMs, rateLimitRemaining } = error.data;
+      const { status, method, retryAfterMs, rateLimitRemaining, type } = error.data;
 
       if (typeof status === 'number') {
         info.status = status;
@@ -341,6 +429,9 @@ export class ErrorHandler {
       }
       if (typeof rateLimitRemaining === 'number') {
         info.rateLimitRemaining = rateLimitRemaining;
+      }
+      if (type === 'network_error') {
+        info.connectionFailed = true;
       }
 
       return info;
@@ -362,6 +453,9 @@ export class ErrorHandler {
     if (method !== undefined) {
       info.method = method;
     }
+    if (transportFailure(axiosError) === 'network') {
+      info.connectionFailed = true;
+    }
 
     return info;
   }
@@ -372,30 +466,14 @@ export class ErrorHandler {
    * This answers a narrow question: is the *upstream condition* transient? It says
    * nothing about whether replaying the request is safe - a 500 on a POST is transient
    * but may have partially applied. That call belongs to the caller, which knows the
-   * verb.
+   * verb. A dropped or refused connection is transient; a timeout is not retried.
    */
   isRetryable(error: unknown): boolean {
-    const status = this.getRetryInfo(error).status;
-    return status !== undefined && RETRYABLE_STATUS_CODES.includes(status);
-  }
-
-  /**
-   * Create a user-friendly error message
-   */
-  getUserFriendlyMessage(error: unknown): string {
-    if (error instanceof McpError) {
-      return error.message;
+    const info = this.getRetryInfo(error);
+    if (info.connectionFailed) {
+      return true;
     }
-
-    const err = error as ErrorLike;
-
-    if (err.isAxiosError) {
-      const status = err.response?.status;
-      const mapping = this.errorMappings[status as keyof typeof this.errorMappings];
-      return mapping?.message || 'An error occurred while communicating with BookStack';
-    }
-
-    return 'An unexpected error occurred';
+    return info.status !== undefined && RETRYABLE_STATUS_CODES.includes(info.status);
   }
 }
 
