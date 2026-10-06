@@ -373,6 +373,20 @@ Recover with one of:
 npm pack --dry-run   # exactly what a release would contain
 ```
 
+## Docker image
+
+Pushing a `v*` tag runs `.github/workflows/image.yml`. It checks that the tag equals
+`v` + `package.json#version`, builds the image, runs the image smoke suite against it,
+and only then pushes `ghcr.io/<owner>/bookstack-mcp-server:<version>` and `:<major>.<minor>`
+(plus `latest` for a non-prerelease), with provenance and an SBOM.
+
+Tags that release-please creates with `GITHUB_TOKEN` do not trigger other workflows.
+Build those by running the workflow on the tag; it refuses any ref that is not a `v*` tag:
+
+```bash
+gh workflow run image.yml --ref v2.2.0
+```
+
 ---
 
 ## Doing a release by hand (escape hatch)
