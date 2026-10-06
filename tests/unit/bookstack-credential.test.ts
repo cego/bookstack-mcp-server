@@ -14,7 +14,6 @@ function configFor(stub: BookStackStub, apiToken?: string): Config {
     rateLimit: { requestsPerMinute: 60_000, burstLimit: 10_000 },
     validation: { enabled: true, strictMode: true },
     logging: { level: 'error', format: 'json' },
-    development: { nodeEnv: 'test', debug: false },
   };
 }
 

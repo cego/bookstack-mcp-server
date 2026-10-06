@@ -762,11 +762,6 @@ export function redactLogMeta(meta: unknown): unknown {
   return redactValue(meta, 0, new WeakSet<object>(), 'withhold');
 }
 
-/** As `redactLogMeta`, for bound child metadata, whose record shape must be preserved. */
-export function redactLogRecord(meta: Record<string, unknown>): Record<string, unknown> {
-  return redactRecord(meta, 0, new WeakSet<object>());
-}
-
 /** Build the Winston format matching `format`. */
 function buildFormat(format: LogFormat): winston.Logform.Format {
   if (format === 'json') {
@@ -872,13 +867,6 @@ export class Logger {
 
   error(message: string, meta?: unknown): void {
     this.write('error', message, meta);
-  }
-
-  /** Bound metadata is redacted too: it is rendered onto every line the child writes. */
-  child(meta: Record<string, unknown>): Logger {
-    const childLogger = new Logger(this.options);
-    childLogger.logger = this.logger.child(redactLogRecord(meta));
-    return childLogger;
   }
 }
 

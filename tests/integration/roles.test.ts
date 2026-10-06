@@ -262,7 +262,6 @@ describe.skipIf(!runIntegration)('BookStack role tools (live)', () => {
       // see exactly what a deployed server does with the same input.
       validation: { enabled: true, strictMode: true },
       logging: { level: 'info', format: 'pretty' },
-      development: { nodeEnv: 'test', debug: false },
     };
 
     const logger = Logger.getInstance();

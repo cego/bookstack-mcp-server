@@ -296,7 +296,6 @@ describe.skipIf(!runIntegration)('bookstack_chapters_* tools (live BookStack)', 
       rateLimit: { requestsPerMinute: 120, burstLimit: 20 },
       validation: { enabled: true, strictMode: true },
       logging: { level: 'error', format: 'pretty' },
-      development: { nodeEnv: 'test', debug: false },
     };
 
     const logger = Logger.getInstance();

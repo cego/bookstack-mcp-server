@@ -21,6 +21,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
 import type { Subprocess } from 'bun';
 import pkg from '../../package.json' with { type: 'json' };
+import { MISSING_API_TOKEN_MESSAGE } from '../../src/api/client';
 import { type BookStackStub, startBookStackStub } from './stub-bookstack';
 
 const REPO_ROOT = join(import.meta.dir, '..', '..');
@@ -42,6 +43,8 @@ interface JsonRpcMessage {
   result?: {
     serverInfo?: { name?: string; version?: string };
     tools?: Array<{ name: string }>;
+    content?: Array<{ type: string; text: string }>;
+    isError?: boolean;
   };
   error?: { code: number; message: string };
 }
@@ -375,6 +378,31 @@ describe('stdio entry point', () => {
   );
 
   it(
+    'returns a tool failure as an isError result over stdio',
+    async () => {
+      const server = spawnStdioServer();
+      await initialize(server);
+
+      server.send({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'bookstack_books_read', arguments: { id: 999 } },
+      });
+      const reply = parseProtocolLine(await server.nextStdoutLine());
+
+      expect(reply.error).toBeUndefined();
+      expect(reply.result?.isError).toBe(true);
+      const text = reply.result?.content?.[0]?.text ?? '';
+      expect(text).toContain('Requested resource not found');
+      expect(text).toContain('"status": 404');
+      expect(text).toContain('Book not found');
+      expect(text).not.toContain('client.ts');
+    },
+    REPLY_TIMEOUT_MS + 5_000
+  );
+
+  it(
     'sends its human-readable startup notice to stderr',
     async () => {
       // The other half of the contract: diagnostics must still be emitted, just not on
@@ -385,6 +413,51 @@ describe('stdio entry point', () => {
       await initialize(server);
 
       expect(server.stderrText()).toContain('listening on stdio');
+    },
+    REPLY_TIMEOUT_MS + 5_000
+  );
+});
+
+/** Run the entry point until it exits, with an explicit environment. */
+async function runToExit(
+  env: Record<string, string>
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn({
+    cmd: [process.execPath, 'run', SERVER_ENTRY],
+    cwd: REPO_ROOT,
+    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env },
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const timer = setTimeout(() => proc.kill(), REPLY_TIMEOUT_MS);
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  clearTimeout(timer);
+  return { exitCode, stdout, stderr };
+}
+
+describe('stdio startup without BOOKSTACK_API_TOKEN', () => {
+  it(
+    'prints one clean line naming the variable to stderr and exits 1',
+    async () => {
+      const { exitCode, stdout, stderr } = await runToExit({
+        MCP_TRANSPORT: 'stdio',
+        BOOKSTACK_BASE_URL: stub.baseUrl,
+        LOG_FORMAT: 'json',
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe('');
+      expect(stderr.split('\n').filter((line) => line.includes('BOOKSTACK_API_TOKEN'))).toEqual([
+        `Failed to start stdio transport: ${MISSING_API_TOKEN_MESSAGE}`,
+      ]);
+      expect(stderr).not.toContain('client.ts');
+      expect(stderr).not.toContain('    at ');
+      expect(stderr).not.toContain('listening on stdio');
     },
     REPLY_TIMEOUT_MS + 5_000
   );
@@ -579,8 +652,8 @@ describe('spawned stdio server never logs a secret', () => {
         });
         await server.nextStdoutLine();
 
-        // The upload guard interpolates the caller's path into its error message; the
-        // tool boundary then logs that message and its stack.
+        // The upload guard refuses this path, and the tool boundary logs the refusal and its
+        // stack; neither may carry the caller's path.
         server.send({
           jsonrpc: '2.0',
           id: 13,
@@ -670,7 +743,7 @@ describe('spawned stdio server never logs a secret', () => {
         expect(stderr).toContain('[redacted:');
         // Frames survive: this is the "where", and it is a code location rather than
         // caller text. Losing it would be trading the leak for a blind spot.
-        expect(stderr).toContain('resolveRealPath');
+        expect(stderr).toContain('readGuardedUploadFile');
         expect(stderr).toContain('client.ts');
 
         // THE CALL SITES, LINE BY LINE.

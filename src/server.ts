@@ -8,6 +8,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -82,6 +83,11 @@ function schemaPropertyNames(node: MCPSchemaNode, into: Set<string>): void {
   }
 }
 
+/** Whether a registered resource URI is an RFC 6570 template rather than a concrete URI. */
+function isResourceTemplate(uri: string): boolean {
+  return uri.includes('{');
+}
+
 /**
  * Split the names a tool was called with into "ours" and "how many others".
  *
@@ -123,7 +129,7 @@ function splitArgumentNames(tool: MCPTool, args: unknown): { known: string[]; un
  *   shelves, users, roles, attachments, image gallery, search, recycle bin, content
  *   permissions, the audit log and system info. Not every endpoint family is exposed -
  *   comments, imports, tags, image-gallery `data` and ZIP export are not.
- * - 11 resources for read-only content access
+ * - 5 resources and 6 resource templates for read-only content access
  * - Comprehensive error handling and validation
  * - Rate limiting and retry policies
  */
@@ -173,9 +179,11 @@ export class BookStackMCPServer {
     this.registerLogVocabulary();
     this.setupHandlers();
 
+    const resourceCounts = this.resourceCounts();
     this.logger.info('BookStack MCP Server initialized', {
       tools: this.tools.size,
-      resources: this.resources.size,
+      resources: resourceCounts.resources,
+      resource_templates: resourceCounts.templates,
       // Not `{baseUrl}` - see the note at the same line in ./api/client.ts, and
       // describeBaseUrl() in ./utils/rateLimit.
       ...describeBaseUrl(config.bookstack.baseUrl),
@@ -262,7 +270,14 @@ export class BookStackMCPServer {
       });
     });
 
-    this.logger.info(`Registered ${this.resources.size} resources`);
+    const { resources, templates } = this.resourceCounts();
+    this.logger.info(`Registered ${resources} resources and ${templates} resource templates`);
+  }
+
+  /** How many registered resources are concrete URIs, and how many are templates. */
+  private resourceCounts(): { resources: number; templates: number } {
+    const templates = [...this.resources.keys()].filter(isResourceTemplate).length;
+    return { resources: this.resources.size - templates, templates };
   }
 
   /**
@@ -365,21 +380,39 @@ export class BookStackMCPServer {
         // stack. Handing it pre-stringified would be redacted down to a size and
         // lose the type/status that make the line useful.
         this.logger.error('Tool failed', { tool: tool.name, err: error });
-        throw this.errorHandler.handleError(error);
+        // Execution and validation errors are results the model reads, per the MCP spec.
+        return this.errorHandler.toToolErrorResult(error);
       }
     });
 
-    // List resources handler
+    // List resources handler: concrete URIs only, templates are listed separately
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      const resources = Array.from(this.resources.values()).map((resource) => ({
-        uri: resource.uri,
-        name: resource.name,
-        description: resource.description,
-        mimeType: resource.mimeType,
-      }));
+      const resources = Array.from(this.resources.values())
+        .filter((resource) => !isResourceTemplate(resource.uri))
+        .map((resource) => ({
+          uri: resource.uri,
+          name: resource.name,
+          description: resource.description,
+          mimeType: resource.mimeType,
+        }));
 
       this.logger.debug(`Listed ${resources.length} resources`);
       return { resources };
+    });
+
+    // List resource templates handler
+    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+      const resourceTemplates = Array.from(this.resources.values())
+        .filter((resource) => isResourceTemplate(resource.uri))
+        .map((resource) => ({
+          uriTemplate: resource.uri,
+          name: resource.name,
+          description: resource.description,
+          mimeType: resource.mimeType,
+        }));
+
+      this.logger.debug(`Listed ${resourceTemplates.length} resource templates`);
+      return { resourceTemplates };
     });
 
     // Read resource handler
@@ -445,7 +478,7 @@ export class BookStackMCPServer {
     uri: string
   ): { resource: MCPResource; facts: Record<string, number> } | undefined {
     for (const [template, resource] of this.resources.entries()) {
-      if (!template.includes('{')) {
+      if (!isResourceTemplate(template)) {
         if (template === uri) {
           return { resource, facts: {} };
         }
@@ -500,6 +533,7 @@ export class BookStackMCPServer {
     status: 'healthy' | 'unhealthy';
     checks: Array<{ name: string; healthy: boolean; message?: string }>;
   }> {
+    const { resources, templates } = this.resourceCounts();
     const checks = [
       {
         name: 'bookstack_connection',
@@ -514,7 +548,7 @@ export class BookStackMCPServer {
       {
         name: 'resources_loaded',
         healthy: this.resources.size > 0,
-        message: `${this.resources.size} resources loaded`,
+        message: `${resources} resources and ${templates} resource templates loaded`,
       },
     ];
 
@@ -771,23 +805,81 @@ async function oauthReadiness(
   return { status: checks.every((check) => check.healthy) ? 'healthy' : 'unhealthy', checks };
 }
 
-/**
- * Per-request credential selection in shared-secret mode. Reachable only by callers that
- * cleared the bearer check; it is an outbound-request surface, since x-bookstack-url
- * decides which host this server will talk to on the caller's behalf.
- */
-function tokenModeOverrides(req: Request, config: Config): Partial<Config> {
-  const bookstackUrl = req.headers['x-bookstack-url'] as string;
-  const bookstackToken = req.headers['x-bookstack-token'] as string;
+/** x-bookstack-url without an operator allowlist. */
+export const UPSTREAM_URL_DISABLED_MESSAGE =
+  'x-bookstack-url is not accepted: this server has no BOOKSTACK_ALLOWED_BASE_URLS configured.';
 
-  return {
-    bookstack: {
-      baseUrl: bookstackUrl || config.bookstack.baseUrl,
-      apiToken: bookstackToken || config.bookstack.apiToken,
-      timeout: config.bookstack.timeout,
-    },
+/** x-bookstack-url naming an upstream the operator did not list; the value is not repeated. */
+export const UPSTREAM_URL_NOT_ALLOWED_MESSAGE =
+  'x-bookstack-url is not one of the BookStack base URLs in BOOKSTACK_ALLOWED_BASE_URLS.';
+
+/** x-bookstack-url without the caller's own token. */
+export const UPSTREAM_URL_WITHOUT_TOKEN_MESSAGE =
+  'x-bookstack-url requires x-bookstack-token: the configured BOOKSTACK_API_TOKEN is only ' +
+  'ever sent to BOOKSTACK_BASE_URL.';
+
+/** One override header as a string; blank counts as absent, as it always has. */
+function overrideHeader(req: Request, name: string): string | undefined {
+  const value = req.headers[name];
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/** `canonicalBaseUrl()`, or undefined for a value it refuses. */
+function canonicalOrUndefined(url: string): string | undefined {
+  try {
+    return canonicalBaseUrl(url);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Token-mode overrides: x-bookstack-url must be allowlisted and carry its own x-bookstack-token. */
+function tokenModeOverrides(
+  config: Config,
+  allowedBaseUrls: ReadonlySet<string> | undefined
+): RequestHandler {
+  return (req, res, next) => {
+    const url = overrideHeader(req, 'x-bookstack-url');
+    const token = overrideHeader(req, 'x-bookstack-token');
+
+    let refusal: string | undefined;
+    if (url !== undefined) {
+      const canonical = canonicalOrUndefined(url);
+      if (!allowedBaseUrls) {
+        refusal = UPSTREAM_URL_DISABLED_MESSAGE;
+      } else if (canonical === undefined || !allowedBaseUrls.has(canonical)) {
+        refusal = UPSTREAM_URL_NOT_ALLOWED_MESSAGE;
+      } else if (token === undefined) {
+        refusal = UPSTREAM_URL_WITHOUT_TOKEN_MESSAGE;
+      }
+    }
+    if (refusal) {
+      res.status(400).json({ error: 'Bad Request', message: refusal });
+      return;
+    }
+
+    const overrides: Partial<Config> = {
+      bookstack: {
+        baseUrl: url ?? config.bookstack.baseUrl,
+        apiToken: token ?? config.bookstack.apiToken,
+        timeout: config.bookstack.timeout,
+      },
+    };
+    res.locals.bookstackOverrides = overrides;
+    next();
   };
 }
+
+/** Streamable HTTP without SSE or sessions: GET and DELETE on the MCP endpoint are not offered. */
+const methodNotAllowed: RequestHandler = (req, res) => {
+  res.setHeader('Allow', 'POST');
+  res.status(405).json({
+    error: 'Method Not Allowed',
+    message:
+      `${req.method} /message is not supported: this server has no SSE stream or sessions. ` +
+      'Send MCP messages with POST /message.',
+  });
+};
 
 /** Per-request BookStack overrides would let a caller send the user's BookStack token elsewhere. */
 const refuseUpstreamOverrides: RequestHandler = (req, res, next) => {
@@ -850,6 +942,10 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
   // process could never serve a single tool call, so it must not reach a listening socket
   // and then admit that one unauthenticated /health at a time.
   canonicalBaseUrl(config.bookstack.baseUrl);
+  // Same for a hand-built allowlist: an entry that cannot be canonicalised refuses the app.
+  const allowedBaseUrls = http.allowedBaseUrls?.length
+    ? new Set(http.allowedBaseUrls.map(canonicalBaseUrl))
+    : undefined;
 
   const app = express();
   let mcpServer: BookStackMCPServer | undefined;
@@ -900,8 +996,8 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
    *
    * Built from the app's own config rather than re-reading the singleton, so the readiness
    * probe reports on the BookStack this app was actually configured with. Cached across
-   * requests because constructing one registers all 59 tools and 11 resources - work an
-   * anonymous caller must not be able to trigger per request.
+   * requests because constructing one registers all 59 tools, 5 resources and 6 resource
+   * templates - work an anonymous caller must not be able to trigger per request.
    */
   function healthServer(): BookStackMCPServer {
     if (!mcpServer) {
@@ -1007,15 +1103,21 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
     }
   });
 
+  // Answered before authentication, in both auth modes.
+  app.get('/message', methodNotAllowed);
+  app.delete('/message', methodNotAllowed);
+
   app.post(
     '/message',
     // Order is load-bearing. Authentication runs before express.json() below, so an
     // unauthenticated caller is turned away at the header - it can never make this
     // process buffer a body up to the ceiling, nor reach a BookStackMCPServer (and
     // therefore the operator's BookStack token). In OAuth mode the override refusal runs
-    // first, so a refused request never spends a token exchange.
+    // first, so a refused request never spends a token exchange; in token mode the override
+    // check runs after authentication and before the body is buffered.
     ...(oauth ? [refuseUpstreamOverrides] : []),
     authenticate,
+    ...(oauth ? [] : [tokenModeOverrides(config, allowedBaseUrls)]),
     express.json({ limit: http.bodyLimitBytes }),
     createBodyErrorHandler(http.bodyLimitBytes),
     // `req`/`res` are annotated because Express stops inferring handler parameter types
@@ -1025,7 +1127,7 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
       try {
         const server = oauth
           ? new BookStackMCPServer({ bookstack: config.bookstack }, bookstackCredential(res))
-          : new BookStackMCPServer(tokenModeOverrides(req, config));
+          : new BookStackMCPServer(res.locals.bookstackOverrides as Partial<Config>);
         // Omitting `sessionIdGenerator` selects the SDK's stateless mode, which is exactly
         // what passing it as `undefined` did; `exactOptionalPropertyTypes` forbids the
         // explicit-undefined form since the option is declared as `sessionIdGenerator?: () => string`.
@@ -1076,7 +1178,14 @@ function startHttpServer(): void {
   const app = createHttpApp({ config, http: httpConfig });
   const port = config.server.port;
 
-  app.listen(port, () => {
+  app.listen(port, (error) => {
+    if (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      console.error(
+        `Failed to start HTTP transport: cannot listen on port ${port} (${code ?? error.message})`
+      );
+      process.exit(1);
+    }
     // Logger, never console.log: console.log writes to STDOUT. This path only runs
     // under the HTTP transport today, but a stray stdout write is exactly what
     // corrupted the stdio JSON-RPC stream once already (dotenv's banner), so the
@@ -1089,24 +1198,30 @@ function startHttpServer(): void {
   });
 }
 
+/** Build and connect the stdio transport. Rejects if it is not safe to start. */
+async function startStdioServer(): Promise<void> {
+  const server = new BookStackMCPServer();
+  await server.connect(new StdioServerTransport());
+
+  console.error('BookStack MCP Server started and listening on stdio');
+
+  // Handle graceful shutdown
+  process.on('SIGINT', () => server.shutdown());
+  process.on('SIGTERM', () => server.shutdown());
+}
+
 // Start server if run directly
 if (import.meta.main) {
   const transport = process.env.MCP_TRANSPORT || 'http';
 
   if (transport === 'stdio') {
-    const server = new BookStackMCPServer();
-    const stdioTransport = new StdioServerTransport();
-
-    server.connect(stdioTransport).catch((error) => {
-      console.error('Failed to start server:', error);
+    // One line on stderr, never a stack: stdout is the protocol stream.
+    startStdioServer().catch((error: unknown) => {
+      console.error(
+        `Failed to start stdio transport: ${error instanceof Error ? error.message : String(error)}`
+      );
       process.exit(1);
     });
-
-    console.error('BookStack MCP Server started and listening on stdio');
-
-    // Handle graceful shutdown
-    process.on('SIGINT', () => server.shutdown());
-    process.on('SIGTERM', () => server.shutdown());
   } else {
     try {
       startHttpServer();

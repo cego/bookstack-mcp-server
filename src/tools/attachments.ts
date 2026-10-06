@@ -173,13 +173,15 @@ export class AttachmentTools {
           },
           file: {
             type: 'string',
+            minLength: 1,
             description:
               'Base64 encoded file content, at most 50000 KB. Mutually exclusive with file_path and link.',
           },
           file_path: {
             type: 'string',
+            minLength: 1,
             description:
-              'Path to a file on the server to upload instead of inlining base64. Mutually exclusive with file and link. Allowed when the server runs over the stdio transport; over HTTP it requires the operator to set BOOKSTACK_UPLOAD_ROOT and the path must resolve inside it.',
+              'Path to a file on the server to upload instead of inlining base64. Mutually exclusive with file and link. Requires the operator to set BOOKSTACK_UPLOAD_ROOT, under every transport, and the path must resolve inside it.',
           },
           link: {
             type: 'string',
@@ -233,7 +235,7 @@ export class AttachmentTools {
       ],
       usage_patterns: [
         'Use attachments for non-image files or external links that should be associated with a page',
-        'Prefer file_path over base64 for large files, where the transport allows it',
+        'Prefer file_path over base64 for large files, where the operator has set BOOKSTACK_UPLOAD_ROOT',
       ],
       related_tools: ['bookstack_pages_read'],
       error_codes: [
@@ -350,13 +352,15 @@ export class AttachmentTools {
           },
           file: {
             type: 'string',
+            minLength: 1,
             description:
               'New Base64 encoded file content (Replaces existing file), at most 50000 KB. Mutually exclusive with file_path and link.',
           },
           file_path: {
             type: 'string',
+            minLength: 1,
             description:
-              'Path to a file on the server to upload instead of inlining base64. Mutually exclusive with file and link. Allowed when the server runs over the stdio transport; over HTTP it requires the operator to set BOOKSTACK_UPLOAD_ROOT and the path must resolve inside it.',
+              'Path to a file on the server to upload instead of inlining base64. Mutually exclusive with file and link. Requires the operator to set BOOKSTACK_UPLOAD_ROOT, under every transport, and the path must resolve inside it.',
           },
           link: {
             type: 'string',

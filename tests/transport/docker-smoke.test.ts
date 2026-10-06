@@ -30,7 +30,7 @@ const IMAGE = process.env.DOCKER_SMOKE_IMAGE ?? 'bookstack-mcp-server:ci';
 /** Dummy credentials: syntactically valid, pointing nowhere. */
 const MCP_AUTH_TOKEN = 'docker-smoke-inbound-secret';
 const BOOKSTACK_API_TOKEN = 'docker-smoke-id:docker-smoke-secret';
-/** Port 9 (discard) inside the container: reliably closed, so health fails fast. */
+/** Port 9 (discard) inside the container: reliably closed, so health reports unhealthy. */
 const UNREACHABLE_BOOKSTACK = 'http://127.0.0.1:9/api';
 
 /** How long to wait for the container's HTTP transport to answer. */

@@ -381,16 +381,22 @@ Images are versioned `<version>-r<revision>`: `<version>` is `package.json#versi
 
 Pushing a tag like `v2.1.0-r1` runs `.github/workflows/image.yml`, which:
 
-1. refuses a tag whose `<version>` is not `package.json#version`;
+1. refuses a tag whose commit is not on `main`, or whose `<version>` is not
+   `package.json#version`;
 2. builds the image with `SERVER_VERSION=2.1.0-r1`, so `GET /` and MCP `initialize` report it;
 3. runs the image smoke suite against it;
-4. only then pushes `ghcr.io/<owner>/bookstack-mcp-server:2.1.0-r1`, with provenance and
+4. refuses a tag whose image already exists in GHCR, so a published image is never
+   overwritten;
+5. only then pushes `ghcr.io/<owner>/bookstack-mcp-server:2.1.0-r1`, with provenance and
    an SBOM. No `latest` or moving tags: deploy by digest.
 
 ```bash
 git tag v2.1.0-r1 <commit> && git push origin v2.1.0-r1
-gh workflow run image.yml --ref v2.1.0-r1   # rebuild an existing tag
+gh workflow run image.yml --ref v2.1.0-r1   # build a tag that has no image yet
 ```
+
+The dispatch is for a tag whose run failed before pushing. To change a published image,
+tag the next revision (`v2.1.0-r2`) instead.
 
 Plain `vX.Y.Z` tags, including the ones release-please creates, build no image. To
 follow these tags with Renovate, use regex versioning such as

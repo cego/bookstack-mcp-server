@@ -144,7 +144,6 @@ describe.skipIf(!runIntegration)('system + server-info tools (live BookStack)', 
       rateLimit: { requestsPerMinute: 60, burstLimit: 10 },
       validation: { enabled: true, strictMode: false },
       logging: { level: 'error', format: 'json' },
-      development: { nodeEnv: 'test', debug: false },
     };
 
     const logger = Logger.getInstance();
@@ -321,7 +320,7 @@ describe.skipIf(!runIntegration)('system + server-info tools (live BookStack)', 
       expect(info.capabilities.tools.total).toBe(toolsMap.size);
       expect(info.capabilities.resources.total).toBe(resourcesMap.size);
       expect(info.capabilities.authentication.required).toBe(true);
-      expect(info.capabilities.authentication.methods).toContain('API Token');
+      expect(info.capabilities.authentication.methods).toContain('BookStack API token');
       expect(info.tool_categories.length).toBeGreaterThan(0);
       expect(info.resource_types.length).toBeGreaterThan(0);
       expect(info.error_handling.common_errors.length).toBeGreaterThan(0);

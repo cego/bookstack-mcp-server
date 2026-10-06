@@ -176,7 +176,6 @@ describe.skipIf(!runIntegration)('recycle-bin tools (live BookStack)', () => {
       rateLimit: { requestsPerMinute: 60, burstLimit: 10 },
       validation: { enabled: true, strictMode: false },
       logging: { level: 'error', format: 'json' },
-      development: { nodeEnv: 'test', debug: false },
     };
 
     const logger = Logger.getInstance();

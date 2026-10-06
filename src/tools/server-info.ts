@@ -162,7 +162,10 @@ export class ServerInfoTools {
             },
             authentication: {
               required: true,
-              methods: ['API Token'],
+              methods: [
+                'BookStack API token',
+                'OAuth access token (HTTP transport with MCP_AUTH_MODE=oauth)',
+              ],
             },
             rate_limiting: {
               enabled: !!config.rateLimit,
@@ -774,7 +777,7 @@ export class ServerInfoTools {
             tool_or_resource: 'bookstack_pages_read',
             parameters: { id: 12, grep: 'retention period', context: 300 },
             description:
-              'Returns only matching excerpts from the STORED source. Copy one verbatim as old_string - that is what makes the anchor match',
+              "Returns only matching excerpts from the STORED source. Copy a match's exact `context` verbatim as old_string - that is what makes the anchor match",
           },
           {
             step: 3,

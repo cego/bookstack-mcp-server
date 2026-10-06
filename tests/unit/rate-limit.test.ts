@@ -131,7 +131,6 @@ function testConfig(baseUrl: string, overrides: Partial<Config['rateLimit']> = {
     rateLimit: { requestsPerMinute: 60, burstLimit: 1, ...overrides },
     validation: { enabled: true, strictMode: true },
     logging: { level: 'error', format: 'pretty' },
-    development: { nodeEnv: 'test', debug: false },
   };
 }
 

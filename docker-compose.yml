@@ -88,7 +88,7 @@ services:
     volumes:
       - bookstack_config:/config
     ports:
-      - "6875:80"
+      - "127.0.0.1:6875:80"
 
   mcp:
     build: .
@@ -126,7 +126,7 @@ services:
       - "127.0.0.1:3000:3000"
     healthcheck:
       # Same bun-based probe as the Dockerfile (the image has bun, not node).
-      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:3000/health').catch(()=>null); process.exit(r&&r.status===200?0:1)"]
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:'+(process.env.SERVER_PORT||3000)+'/health').catch(()=>null); process.exit(r&&r.status===200?0:1)"]
       interval: 30s
       timeout: 10s
       retries: 3

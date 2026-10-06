@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { readFile, realpath } from 'node:fs/promises';
-import { Agent } from 'node:https';
+import { Agent as HttpAgent } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
 import { basename, extname, sep } from 'node:path';
 import axios, {
   type AxiosError,
@@ -105,10 +106,11 @@ const RETRY_JITTER_RATIO = 0.25;
 /**
  * Methods whose replay cannot create or duplicate state.
  *
- * Used ONLY to gate 5xx retries. A 5xx means the request reached BookStack and may have
- * partially applied - replaying a POST could duplicate a page - so 5xx is retried for
- * safe verbs only. A 429 is different in kind: the throttle middleware rejects the
- * request *before* the route runs, so nothing was executed and any verb may be replayed.
+ * Gates 5xx and connection-failure retries. A 5xx means the request reached BookStack and
+ * may have partially applied - replaying a POST could duplicate a page - and a dropped
+ * connection cannot say whether it did, so both are retried for safe verbs only. A 429 is
+ * different in kind: the throttle middleware rejects the request *before* the route runs,
+ * so nothing was executed and any verb may be replayed.
  */
 const REPLAY_SAFE_METHODS: readonly string[] = ['GET', 'HEAD', 'OPTIONS'];
 
@@ -160,6 +162,21 @@ export interface ExportContent extends ExportResult {
   encoding: 'utf8' | 'base64';
   byte_length: number;
 }
+
+/** Socket idle timeout for the shared agents; request time limits stay on axios's `timeout`. */
+const AGENT_SOCKET_TIMEOUT_MS = 30_000;
+
+/** Keep-alive agents shared by every client, so sockets are pooled across requests. */
+const sharedHttpAgent = new HttpAgent({
+  keepAlive: true,
+  maxFreeSockets: 10,
+  timeout: AGENT_SOCKET_TIMEOUT_MS,
+});
+const sharedHttpsAgent = new HttpsAgent({
+  keepAlive: true,
+  maxFreeSockets: 10,
+  timeout: AGENT_SOCKET_TIMEOUT_MS,
+});
 
 /** Pause for `ms`, used between retry attempts. */
 function sleep(ms: number): Promise<void> {
@@ -311,67 +328,58 @@ function isContainedIn(target: string, root: string): boolean {
   return target.startsWith(rootWithSep);
 }
 
-/** Resolve a path to its real location, reporting a clear error if it is unreadable. */
-async function resolveRealPath(candidate: string, label: string): Promise<string> {
-  try {
-    return await realpath(candidate);
-  } catch {
-    throw new Error(`${label} '${candidate}' does not exist or is not readable by the server.`);
-  }
-}
+/** `file_path` without an operator-chosen upload directory. */
+export const UPLOAD_ROOT_UNSET_MESSAGE =
+  "'file_path' is disabled because BOOKSTACK_UPLOAD_ROOT is not set. Ask the operator to set " +
+  'it to a directory uploads may be read from, or send the file content inline as base64.';
+
+/** BOOKSTACK_UPLOAD_ROOT is set but cannot be resolved; the value itself is not repeated. */
+export const UPLOAD_ROOT_UNUSABLE_MESSAGE =
+  "'file_path' is unavailable because BOOKSTACK_UPLOAD_ROOT is not a readable directory on " +
+  'this server. Send the file content inline as base64 instead.';
+
+/** One refusal for missing, unreadable and out-of-root paths alike, so it reveals nothing. */
+export const UPLOAD_PATH_REFUSED_MESSAGE =
+  "'file_path' must name a readable file inside BOOKSTACK_UPLOAD_ROOT. Send the file content " +
+  'inline as base64 instead.';
 
 /**
  * SECURITY GUARD for the `file_path` upload parameter.
  *
  * `file_path` asks the *server process* to read a local file and upload its bytes to
- * BookStack. This server also exposes an HTTP transport (`POST /message`), where the
- * caller is remote and untrusted. An unguarded `file_path` would therefore be an
- * arbitrary-local-file-read and exfiltration primitive: a remote caller could pass
- * `/etc/passwd` or `~/.ssh/id_rsa` and have the server upload it into BookStack.
+ * BookStack. Unguarded, that is an arbitrary-local-file-read and exfiltration primitive for
+ * whoever steers the tool arguments: a remote HTTP caller, or - under stdio - text planted in
+ * a page that an agent reads and then acts on, aiming it at `~/.ssh/id_rsa`.
  *
- * The rules, in order:
+ * So under EVERY transport, stdio included, `file_path` is refused unless the operator opts
+ * in with `BOOKSTACK_UPLOAD_ROOT`. The candidate is then resolved with realpath() - which also
+ * expands symlinks - and must be contained within the likewise-resolved root. This rejects
+ * `../` traversal and symlink escapes, since containment is checked after resolution.
  *
- *  1. stdio transport (`MCP_TRANSPORT=stdio`): the MCP client launched this process and
- *     shares its trust domain, so any path it could already read itself is allowed.
- *  2. Any other transport (HTTP is the default): `file_path` is refused outright unless
- *     the operator explicitly opts in by setting `BOOKSTACK_UPLOAD_ROOT`. When set, the
- *     candidate is resolved with realpath() - which also expands symlinks - and must be
- *     contained within the likewise-resolved root. This rejects `../` traversal and
- *     symlink escapes, since containment is checked after resolution, not before.
- *
- * Refusal is always explicit; `file_path` is never silently ignored.
+ * Refusal is always explicit, and never names a resolved path or the root.
  */
 export async function readGuardedUploadFile(filePath: string): Promise<Buffer> {
-  const transport = process.env.MCP_TRANSPORT ?? 'http';
-
-  // 1. Local stdio client: same trust domain as this process.
-  if (transport === 'stdio') {
-    const realTarget = await resolveRealPath(filePath, 'file_path');
-    return readFile(realTarget);
-  }
-
-  // 2. Remote-capable transport: require an explicit opt-in root.
   const uploadRoot = process.env.BOOKSTACK_UPLOAD_ROOT;
   if (!uploadRoot) {
-    throw new Error(
-      `'file_path' is refused under the '${transport}' transport because the caller may be remote, ` +
-        'and reading arbitrary server-local files would leak them into BookStack. ' +
-        'Set BOOKSTACK_UPLOAD_ROOT to a directory that uploads may be read from to enable it, ' +
-        'or send the file content inline as base64 instead.'
-    );
+    throw new Error(UPLOAD_ROOT_UNSET_MESSAGE);
   }
 
-  const realRoot = await resolveRealPath(uploadRoot, 'BOOKSTACK_UPLOAD_ROOT');
-  const realTarget = await resolveRealPath(filePath, 'file_path');
-
-  if (!isContainedIn(realTarget, realRoot)) {
-    throw new Error(
-      `'file_path' resolves to '${realTarget}', which is outside BOOKSTACK_UPLOAD_ROOT ` +
-        `('${realRoot}'). Only files within that directory may be uploaded.`
-    );
+  let realRoot: string;
+  try {
+    realRoot = await realpath(uploadRoot);
+  } catch {
+    throw new Error(UPLOAD_ROOT_UNUSABLE_MESSAGE);
   }
 
-  return readFile(realTarget);
+  try {
+    const realTarget = await realpath(filePath);
+    if (!isContainedIn(realTarget, realRoot)) {
+      throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
+    }
+    return await readFile(realTarget);
+  } catch {
+    throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
+  }
 }
 
 /**
@@ -484,7 +492,7 @@ export class BookStackClient implements BookStackAPIClient {
     // value makes that class of drift unrepresentable rather than merely absent today.
     //
     // It also validates: `x-bookstack-url` is caller-supplied and never passes through the
-    // config schema (server.ts merges the header straight into a Partial<Config>), so this
+    // config schema (server.ts only checks it against BOOKSTACK_ALLOWED_BASE_URLS), so this
     // is where a junk or non-http(s) URL is refused - before axios is pointed at it.
     const baseUrl = canonicalBaseUrl(config.bookstack.baseUrl);
 
@@ -504,19 +512,15 @@ export class BookStackClient implements BookStackAPIClient {
       burstLimit: config.rateLimit.burstLimit,
     });
 
-    // Create HTTP agent for connection pooling
-    const httpsAgent = new Agent({
-      keepAlive: true,
-      maxSockets: 10,
-      timeout: config.bookstack.timeout,
-    });
-
     // Initialize Axios client
     this.client = axios.create({
       // The same canonical value the bucket above is keyed by - see the note there.
       baseURL: baseUrl,
       timeout: config.bookstack.timeout,
-      httpsAgent,
+      httpAgent: sharedHttpAgent,
+      httpsAgent: sharedHttpsAgent,
+      // A redirect would carry the credential to a host nobody configured.
+      maxRedirects: 0,
       headers: {
         Authorization: `${credential.scheme} ${credential.secret}`,
         'Content-Type': 'application/json',
@@ -599,9 +603,9 @@ export class BookStackClient implements BookStackAPIClient {
    *  - Is replaying this verb safe? -> here, because only the caller knows the method.
    *
    * A 429 is always replayable: Laravel's throttle middleware rejects the request before
-   * the route executes, so no work was done and no state changed. A 5xx is only replayed
-   * for safe verbs, since the request did reach the application and a POST that timed out
-   * mid-write could otherwise be duplicated.
+   * the route executes, so no work was done and no state changed. A 5xx or a dropped
+   * connection is only replayed for safe verbs, since the request may have reached the
+   * application and a POST could otherwise be duplicated. Timeouts are never replayed.
    */
   private isReplayable(error: unknown, method: string): boolean {
     if (!this.errorHandler.isRetryable(error)) {
@@ -679,6 +683,7 @@ export class BookStackClient implements BookStackAPIClient {
           method,
           url: config.url,
           status: info.status,
+          connectionFailed: info.connectionFailed,
           attempt,
           nextAttempt: attempt + 1,
           maxAttempts: RETRY_MAX_ATTEMPTS,
@@ -842,7 +847,7 @@ export class BookStackClient implements BookStackAPIClient {
    * Resolve a `file_path` field into binary content for `fileField`.
    *
    * Delegates the path check to readGuardedUploadFile(); see that function for the
-   * transport-dependent security rules.
+   * security rules.
    */
   private async resolveLocalFile(fields: UploadParams, fileField: string): Promise<void> {
     const filePath = fields[LOCAL_PATH_FIELD];

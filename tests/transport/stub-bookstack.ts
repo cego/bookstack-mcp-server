@@ -116,7 +116,9 @@ export function startBookStackStub(): BookStackStub {
   const server = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
+      // Read every body, as a real server does, so a reused keep-alive connection stays in sync.
+      await request.arrayBuffer();
       const url = new URL(request.url);
       const authorization = request.headers.get('authorization') ?? undefined;
       const path = url.pathname.replace(/^\/api/, '');

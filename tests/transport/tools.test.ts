@@ -97,15 +97,19 @@ const EXPECTED_TOOLS = [
 /** Same reasoning as EXPECTED_TOOLS: the resource URIs are a client-visible contract. */
 const EXPECTED_RESOURCES = [
   'bookstack://books',
-  'bookstack://books/{id}',
   'bookstack://chapters',
-  'bookstack://chapters/{id}',
   'bookstack://pages',
+  'bookstack://shelves',
+  'bookstack://users',
+] as const;
+
+/** The parameterised half of that contract, published on resources/templates/list. */
+const EXPECTED_RESOURCE_TEMPLATES = [
+  'bookstack://books/{id}',
+  'bookstack://chapters/{id}',
   'bookstack://pages/{id}',
   'bookstack://search/{query}',
-  'bookstack://shelves',
   'bookstack://shelves/{id}',
-  'bookstack://users',
   'bookstack://users/{id}',
 ] as const;
 
@@ -121,6 +125,8 @@ const PINNED_ENV = [
   'LOG_FORMAT',
   'VALIDATION_ENABLED',
   'VALIDATION_STRICT_MODE',
+  'RATE_LIMIT_REQUESTS_PER_MINUTE',
+  'RATE_LIMIT_BURST_LIMIT',
 ] as const;
 
 const savedEnv = new Map<string, string | undefined>();
@@ -142,21 +148,39 @@ interface ResourceListEntry {
   uri: string;
   name: string;
 }
+interface ResourceTemplateEntry {
+  uriTemplate: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
 interface ToolCallContent {
   type: string;
   text: string;
-}
-interface ValidationErrorData {
-  type: string;
-  validation: Array<{ field: string; message: string }>;
 }
 interface JsonRpcReply {
   result?: {
     tools?: ToolListEntry[];
     resources?: ResourceListEntry[];
+    resourceTemplates?: ResourceTemplateEntry[];
+    contents?: Array<{ uri: string; mimeType?: string; text: string }>;
     content?: ToolCallContent[];
+    isError?: boolean;
   };
-  error?: { code: number; message: string; data?: ValidationErrorData };
+  error?: { code: number; message: string; data?: unknown };
+}
+
+/** Split a tool error result's text into its message and the JSON hints below it. */
+function toolError(reply: JsonRpcReply): { message: string; data: Record<string, unknown> } {
+  expect(reply.error).toBeUndefined();
+  expect(reply.result?.isError).toBe(true);
+  const text = reply.result?.content?.[0]?.text ?? '';
+  const split = text.indexOf('\n\n');
+  expect(split).toBeGreaterThan(0);
+  return {
+    message: text.slice(0, split),
+    data: JSON.parse(text.slice(split + 2)) as Record<string, unknown>,
+  };
 }
 
 /** The JSON a books list handler returns, once unwrapped from MCP's text content. */
@@ -179,6 +203,9 @@ beforeAll(() => {
   // silently turn that boundary into permissive forwarding before the singleton reloads.
   delete process.env.VALIDATION_ENABLED;
   delete process.env.VALIDATION_STRICT_MODE;
+  // Wide open: at the defaults the shared stub bucket paces calls to 1/s, past the test timeout.
+  process.env.RATE_LIMIT_REQUESTS_PER_MINUTE = '60000';
+  process.env.RATE_LIMIT_BURST_LIMIT = '1000';
 
   // reload() rather than getConfig(): another suite may already have populated the
   // singleton, and /message builds its server from whatever the singleton holds.
@@ -309,7 +336,7 @@ async function runtimeAccepts(
 
   // A call that neither reached BookStack nor reported anything would read as a clean
   // rejection here while actually being a hole in dispatch.
-  if (!reachedBookStack && reply.error === undefined) {
+  if (!reachedBookStack && reply.error === undefined && reply.result?.isError !== true) {
     throw new Error(
       `${toolName} neither called BookStack nor errored for ${JSON.stringify(input)}`
     );
@@ -647,6 +674,11 @@ describe('published JSON Schema agrees with runtime validation', () => {
 describe('published JSON Schema agrees with runtime validation on scalar constraints', () => {
   /** A string of `length` ordinary characters. */
   const chars = (length: number): string => 'x'.repeat(length);
+  /** A well-formed URL exactly `length` characters long. */
+  const linkOfLength = (length: number): string => {
+    const prefix = 'https://example.com/';
+    return `${prefix}${chars(length - prefix.length)}`;
+  };
 
   interface ScalarCase {
     tool: string;
@@ -913,6 +945,16 @@ describe('published JSON Schema agrees with runtime validation on scalar constra
           input: { uploaded_to: 1, name: chars(181), image: 'aGVsbG8=' },
           accepted: false,
         },
+        { label: 'empty base64 image', input: { uploaded_to: 1, image: '' }, accepted: false },
+        { label: 'empty file_path', input: { uploaded_to: 1, file_path: '' }, accepted: false },
+      ],
+    },
+    {
+      tool: 'bookstack_images_update',
+      rows: [
+        { label: 'control: a rename', input: { id: 1, name: 'Diagram' }, accepted: true },
+        { label: 'empty base64 image', input: { id: 1, image: '' }, accepted: false },
+        { label: 'empty file_path', input: { id: 1, file_path: '' }, accepted: false },
       ],
     },
     {
@@ -936,6 +978,44 @@ describe('published JSON Schema agrees with runtime validation on scalar constra
         {
           label: 'name one character over the maximum',
           input: { uploaded_to: 1, name: chars(256), file: 'aGVsbG8=' },
+          accepted: false,
+        },
+        {
+          label: 'empty base64 file',
+          input: { uploaded_to: 1, name: 'Spec', file: '' },
+          accepted: false,
+        },
+        {
+          label: 'empty file_path',
+          input: { uploaded_to: 1, name: 'Spec', file_path: '' },
+          accepted: false,
+        },
+        {
+          label: 'link at the 2000-character maximum',
+          input: { uploaded_to: 1, name: 'Spec', link: linkOfLength(2000) },
+          accepted: true,
+        },
+        {
+          label: 'link one character over the maximum',
+          input: { uploaded_to: 1, name: 'Spec', link: linkOfLength(2001) },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      tool: 'bookstack_attachments_update',
+      rows: [
+        { label: 'control: a rename', input: { id: 1, name: 'Spec' }, accepted: true },
+        { label: 'empty base64 file', input: { id: 1, file: '' }, accepted: false },
+        { label: 'empty file_path', input: { id: 1, file_path: '' }, accepted: false },
+        {
+          label: 'link at the 2000-character maximum',
+          input: { id: 1, link: linkOfLength(2000) },
+          accepted: true,
+        },
+        {
+          label: 'link one character over the maximum',
+          input: { id: 1, link: linkOfLength(2001) },
           accepted: false,
         },
       ],
@@ -1054,10 +1134,10 @@ describe('malformed tools/call arguments are refused before BookStack is contact
     expect(stub.requests).toHaveLength(0);
   });
 
-  it('returns an unknown argument in JSON-RPC validation data without contacting BookStack', async () => {
+  it('returns an unknown argument in the tool error result without contacting BookStack', async () => {
     // Issue #21: a client must receive the reason for a strict rejection, rather than only a
     // generic tool-failed banner. This is deliberately a wire assertion: a unit test of
-    // ErrorHandler would not prove the Streamable HTTP transport preserves McpError.data.
+    // ErrorHandler would not prove the Streamable HTTP transport delivers the details.
     const url = await startApp();
 
     const { status, reply } = await rpc(url, 'tools/call', {
@@ -1071,13 +1151,26 @@ describe('malformed tools/call arguments are refused before BookStack is contact
     });
 
     expect(status).toBe(200);
-    expect(reply.result).toBeUndefined();
-    expect(reply.error?.code).toBe(-32602);
-    expect(reply.error?.message).toContain('Validation failed');
-    expect(reply.error?.data).toEqual({
+    const { message, data } = toolError(reply);
+    expect(message).toBe('Validation failed');
+    expect(data).toEqual({
       type: 'validation_error',
       validation: [{ field: '', message: 'Unrecognized key: "description"' }],
     });
+    expect(stub.requests).toHaveLength(0);
+  });
+
+  it('names the failing field path in the tool error result', async () => {
+    const url = await startApp();
+
+    const { reply } = await rpc(url, 'tools/call', {
+      name: 'bookstack_books_read',
+      arguments: { id: 'one' },
+    });
+
+    const { data } = toolError(reply);
+    expect(data.type).toBe('validation_error');
+    expect(data.validation).toEqual([{ field: 'id', message: expect.any(String) }]);
     expect(stub.requests).toHaveLength(0);
   });
 
@@ -1130,16 +1223,62 @@ describe('malformed tools/call arguments are refused before BookStack is contact
   });
 });
 
-describe('resources/list over HTTP', () => {
-  it('publishes exactly the expected resource surface', async () => {
+describe('resources over HTTP', () => {
+  it('lists only concrete resources on resources/list', async () => {
     const url = await startApp();
 
     const { status, reply } = await rpc(url, 'resources/list');
 
     expect(status).toBe(200);
     const uris = (reply.result?.resources ?? []).map((resource) => resource.uri).sort();
-    expect(uris).toHaveLength(11);
+    expect(uris).toHaveLength(5);
     expect(uris).toEqual([...EXPECTED_RESOURCES]);
+  });
+
+  it('publishes the templated resources on resources/templates/list', async () => {
+    const url = await startApp();
+
+    const { status, reply } = await rpc(url, 'resources/templates/list');
+
+    expect(status).toBe(200);
+    expect(reply.error).toBeUndefined();
+    const templates = reply.result?.resourceTemplates ?? [];
+    expect(templates.map((template) => template.uriTemplate).sort()).toEqual([
+      ...EXPECTED_RESOURCE_TEMPLATES,
+    ]);
+    for (const template of templates) {
+      expect(Object.keys(template).sort()).toEqual([
+        'description',
+        'mimeType',
+        'name',
+        'uriTemplate',
+      ]);
+      expect(template.name.length).toBeGreaterThan(0);
+      expect(template.description?.length).toBeGreaterThan(0);
+      expect(template.mimeType).toBe('application/json');
+    }
+  });
+
+  it('reads a concrete URI built from a template', async () => {
+    const url = await startApp();
+
+    const { reply } = await rpc(url, 'resources/read', { uri: 'bookstack://books/1' });
+
+    expect(reply.error).toBeUndefined();
+    const content = reply.result?.contents?.[0];
+    expect(content?.uri).toBe('bookstack://books/1');
+    expect(content?.mimeType).toBe('application/json');
+    expect((JSON.parse(content?.text ?? '{}') as { name?: string }).name).toBe(STUB_BOOKS[0].name);
+  });
+
+  it('reports a failed resource read as a JSON-RPC error', async () => {
+    const url = await startApp();
+
+    const { reply } = await rpc(url, 'resources/read', { uri: 'bookstack://books/999' });
+
+    expect(reply.result).toBeUndefined();
+    expect(reply.error?.message).toContain('Requested resource not found');
+    expect(JSON.stringify(reply)).not.toContain('client.ts');
   });
 });
 
@@ -1192,6 +1331,51 @@ describe('tools/call over HTTP', () => {
     await rpc(url, 'tools/call', { name: 'bookstack_books_list', arguments: { count: 1 } });
 
     expect(stub.requests[0]?.authorization).toBe(`Token ${config.bookstack.apiToken}`);
+  });
+
+  it('refuses a file_path upload without naming a server path or sending a stack', async () => {
+    const savedRoot = process.env.BOOKSTACK_UPLOAD_ROOT;
+    delete process.env.BOOKSTACK_UPLOAD_ROOT;
+    try {
+      const url = await startApp();
+
+      const { reply } = await rpc(url, 'tools/call', {
+        name: 'bookstack_attachments_create',
+        arguments: { uploaded_to: 1, name: 'Key', file_path: '/etc/upload-probe-marker' },
+      });
+
+      const { message, data } = toolError(reply);
+      expect(message).toContain('BOOKSTACK_UPLOAD_ROOT is not set');
+      expect(data).toEqual({ type: 'internal_error' });
+      expect(JSON.stringify(reply)).not.toContain('upload-probe-marker');
+      expect(JSON.stringify(reply)).not.toContain('client.ts');
+      expect(stub.requests).toHaveLength(0);
+    } finally {
+      if (savedRoot !== undefined) {
+        process.env.BOOKSTACK_UPLOAD_ROOT = savedRoot;
+      }
+    }
+  });
+
+  it('returns a BookStack failure as a tool error result with its status and details', async () => {
+    const url = await startApp();
+
+    const { status, reply } = await rpc(url, 'tools/call', {
+      name: 'bookstack_books_read',
+      arguments: { id: 999 },
+    });
+
+    expect(status).toBe(200);
+    const { message, data } = toolError(reply);
+    expect(message).toBe('Requested resource not found');
+    expect(data).toMatchObject({
+      type: 'not_found_error',
+      status: 404,
+      details: { error: { code: 404, message: 'Book not found' } },
+    });
+    expect(data).not.toHaveProperty('url');
+    expect(JSON.stringify(reply)).not.toContain('client.ts');
+    expect(JSON.stringify(reply)).not.toContain('    at ');
   });
 
   it('reports an unknown tool as a JSON-RPC error, not a crash', async () => {

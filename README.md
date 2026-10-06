@@ -1,10 +1,10 @@
 # BookStack MCP Server
 
-Connect BookStack to Claude and other AI assistants through the Model Context Protocol (MCP). This server exposes 59 tools and 11 resources covering the supported subset of the BookStack API — books, pages, chapters, shelves, search, users, roles, permissions, attachments, images, the recycle bin, the audit log and system info.
+Connect BookStack to Claude and other AI assistants through the Model Context Protocol (MCP). This server exposes 59 tools, 5 resources and 6 resource templates covering the supported subset of the BookStack API — books, pages, chapters, shelves, search, users, roles, permissions, attachments, images, the recycle bin, the audit log and system info.
 
 This server supports two transport modes: **Streamable HTTP** (default) and **Stdio**.
 
-- **Streamable HTTP (default)**: A stateless HTTP transport. Authentication parameters can be overridden per-request using HTTP headers (`x-bookstack-url` and `x-bookstack-token`).
+- **Streamable HTTP (default)**: A stateless HTTP transport. The BookStack token can be overridden per request with `x-bookstack-token`, and the BookStack URL with `x-bookstack-url` when the operator allows it (see [per-request overrides](#per-request-overrides)).
 - **Stdio Mode**: Standard input/output for local integration (e.g., with Claude Desktop). Set `MCP_TRANSPORT=stdio` to enable.
 
 > ⚠️ **Looking for the HTTP endpoint?** The MCP endpoint is `POST /message` — not `/`.
@@ -13,7 +13,7 @@ This server supports two transport modes: **Streamable HTTP** (default) and **St
 ## ✨ What You Get
 
 - **BookStack Integration** - Access your books, pages, chapters, and content
-- **59 MCP Tools & 11 Resources** - CRUD, search and export across the supported endpoint families
+- **59 MCP Tools, 5 Resources & 6 Resource Templates** - CRUD, search and export across the supported endpoint families
 - **Search & Export** - Find content and export in multiple formats
 - **User Management** - Handle users, roles, and permissions
 - **Production Ready** - Rate limiting, validation, error handling, and logging
@@ -98,7 +98,9 @@ export MCP_TRANSPORT="http"
 | `BOOKSTACK_BASE_URL` | `http://localhost:8080/api` | Full URL to the BookStack API. Must be a valid URL and include the `/api` suffix. |
 | `BOOKSTACK_API_TOKEN` | _(none — required, unless `MCP_AUTH_MODE=oauth`)_ | **Outbound** BookStack API token as `token_id:token_secret`. This is the credential the server spends on every tool call. Startup fails if unset. |
 | `BOOKSTACK_TIMEOUT` | `30000` | BookStack request timeout in milliseconds. |
-| `SERVER_PORT` | `3000` | Port the HTTP transport listens on. Ignored in stdio mode. |
+| `BOOKSTACK_ALLOWED_BASE_URLS` | _(none)_ | Comma-separated BookStack API base URLs a caller may name in the `x-bookstack-url` header, compared canonically. Unset refuses that header. See [per-request overrides](#per-request-overrides). |
+| `BOOKSTACK_UPLOAD_ROOT` | _(none)_ | Directory the image/attachment tools' `file_path` may read from. Unset refuses `file_path` under every transport, stdio included; the path must resolve inside this directory. Must be unset with `MCP_AUTH_MODE=oauth`. |
+| `SERVER_PORT` | `3000` | Port the HTTP transport listens on; if it is taken, startup fails with exit code `1`. Ignored in stdio mode. |
 | `HTTP_BODY_LIMIT` | `73400320` (70 MiB) | Maximum accepted `POST /message` body, in bytes. Sized for the largest inline base64 upload the image/attachment tools advertise (50,000 KB). Express's own default is ~100 KB, which would reject real uploads with a `413`. Lower it if untrusted callers can reach the port. |
 | `SERVER_NAME` | `bookstack-mcp-server` | Server name reported over MCP and by `GET /`. |
 | `SERVER_VERSION` | the package's own version | Version reported over MCP `initialize`, by `GET /`, and by `bookstack_server_info`. Defaults to `package.json#version`; leave it unset unless you deliberately want a different value. |
@@ -108,8 +110,6 @@ export MCP_TRANSPORT="http"
 | `VALIDATION_STRICT_MODE` | `true` | Reject invalid tool params at the boundary. Set to `false` to log a warning and forward them to BookStack instead. |
 | `LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`. |
 | `LOG_FORMAT` | `pretty` | One of `json`, `pretty`. |
-| `NODE_ENV` | `development` | One of `development`, `production`, `test`. |
-| `DEBUG` | `false` | Set to `true` for debug output. |
 
 > 💡 Need detailed setup? See the complete [Setup Guide](docs/setup-guide.md)
 
@@ -128,14 +128,15 @@ The transport is chosen at startup from `MCP_TRANSPORT`:
 ### HTTP endpoints
 
 When running in HTTP mode the server exposes three endpoints, plus the OAuth metadata
-document in [OAuth mode](#per-user-oauth). Any other path returns a JSON `404` listing
-the valid ones.
+document in [OAuth mode](#per-user-oauth). `GET` and `DELETE` on `/message` answer `405`
+with `Allow: POST`, before authentication: the server offers no SSE stream and no sessions.
+Any other path returns a JSON `404` listing the valid ones.
 
 | Method & path | Purpose | Status codes |
 | --- | --- | --- |
 | `GET /` | Server info JSON (name, version, `status: "running"`, endpoint list) | `200` |
 | `GET /health` | Health check — verifies live connectivity to BookStack | `200` healthy, `503` unhealthy |
-| `POST /message` | **The MCP endpoint.** Send JSON-RPC MCP messages here | `200`, `401` without a valid bearer token, `500` on error |
+| `POST /message` | **The MCP endpoint.** Send JSON-RPC MCP messages here | `200`, `400` on a malformed body or refused override, `401` without a valid bearer token, `500` on error |
 
 `GET /` and `GET /health` are unauthenticated. **`POST /message` requires an inbound
 `Authorization: Bearer <secret>` header** — it dispatches every tool, including
@@ -178,17 +179,19 @@ with the failing check named:
   "checks": [
     { "name": "bookstack_connection", "healthy": false, "message": "BookStack API connection" },
     { "name": "tools_loaded", "healthy": true, "message": "59 tools loaded" },
-    { "name": "resources_loaded", "healthy": true, "message": "11 resources loaded" }
+    { "name": "resources_loaded", "healthy": true, "message": "5 resources and 6 resource templates loaded" }
   ]
 }
 ```
 
-> ⚠️ A **missing** `BOOKSTACK_API_TOKEN` behaves differently: config validation rejects
-> an empty token at startup, so the process exits with
-> `Configuration validation failed: bookstack.apiToken: BookStack API token is required`
-> before Express ever listens. There is no `/health` to call — `curl` gets a connection
-> refused, and under Docker the container restart-loops. A `503` therefore always means
-> the token is **present but not working**; a dead port means it is **absent**.
+> ⚠️ A **missing** `BOOKSTACK_API_TOKEN` behaves differently: the transport refuses to
+> start. In HTTP token mode the process prints
+> `Failed to start HTTP transport: Configuration validation failed: bookstack.apiToken: BookStack API token is required - set BOOKSTACK_API_TOKEN environment variable`
+> to stderr and exits `1` before Express ever listens. There is no `/health` to call —
+> `curl` gets a connection refused, and under Docker the container restart-loops. A `503`
+> therefore always means the token is **present but not working**; a dead port means it
+> is **absent**. Under stdio the same reason is printed as
+> `Failed to start stdio transport: …`, stdout stays empty and the process exits `1`.
 
 **Call the MCP endpoint** — an `initialize` handshake. Both the `Content-Type`
 and `Accept` headers are required by the Streamable HTTP transport, and
@@ -214,9 +217,14 @@ curl -X POST http://localhost:3000/message \
   }'
 ```
 
-Per-request credential overrides are supported on `POST /message` via the
-`x-bookstack-url` and `x-bookstack-token` headers; both fall back to the
-`BOOKSTACK_BASE_URL` / `BOOKSTACK_API_TOKEN` environment variables. OAuth mode refuses them.
+#### Per-request overrides
+
+`POST /message` accepts two optional headers in token mode. OAuth mode refuses both.
+
+- `x-bookstack-token` alone spends the caller's own BookStack token at `BOOKSTACK_BASE_URL`.
+- `x-bookstack-url` is refused with a `400` unless it names one of
+  `BOOKSTACK_ALLOWED_BASE_URLS`, and then `x-bookstack-token` is required too. A
+  caller-chosen URL is never sent the configured `BOOKSTACK_API_TOKEN`.
 
 ### Per-user OAuth
 
@@ -328,9 +336,9 @@ only the fragment it wants changed:
 | Tool | What it does |
 |---|---|
 | `bookstack_pages_outline` | Heading structure with offsets and section sizes. No content transferred. |
-| `bookstack_pages_read` with `grep` | Matching excerpts from the **stored** source — paste one straight into `old_string`. |
+| `bookstack_pages_read` with `grep` | Matches from the **stored** source, each with an exact `context` slice (no ellipses) — paste it straight into `old_string`. |
 | `bookstack_pages_edit` | Literal find-and-replace. `old_string` must match exactly and be unique unless `replace_all` is set. |
-| `bookstack_pages_append` | Insert at the end of the page, the end of a named section, or right after a section heading. |
+| `bookstack_pages_append` | Insert at the end of the page, the end of a named section (after its subsections), or right after a section heading. Reports the heading used as `section_matched`. |
 
 ```jsonc
 // 1. What sections exist, and how big are they?
@@ -357,8 +365,10 @@ only the fragment it wants changed:
 error carries the first few matches with context. A missing anchor reports the same text found
 with different whitespace, which is the usual near-miss. A result smaller than half the
 original is refused unless `allow_shrink` is set. After a write the page is re-read and the
-change is looked for in normalised text — BookStack rewrites stored HTML on save (heading
-anchors, injected `id` attributes), so a byte comparison would call every success a failure.
+change is looked for in the raw stored source, then in normalised text — BookStack rewrites
+stored HTML on save (heading anchors, injected `id` attributes), so a byte comparison alone
+would call every success a failure. If that re-read fails, the result is `verified: null`:
+the write landed, so do not retry it.
 Every write creates a BookStack revision, so an applied edit can be rolled back in the UI.
 No response from these tools contains page content.
 `expected_updated_at` detects a page changed before this server reads it; BookStack's page
