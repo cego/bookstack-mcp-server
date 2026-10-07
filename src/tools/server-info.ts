@@ -248,6 +248,9 @@ export class ServerInfoTools {
               'recyclebin',
               'attachments',
               'images',
+              'comments',
+              'imports',
+              'tags',
               'meta',
             ],
             description: 'Specific category name. Omit to list every category.',
@@ -607,10 +610,48 @@ export class ServerInfoTools {
         use_cases: ['Upload images', 'Manage gallery assets'],
       },
       {
-        // Without this entry the categories described 54 of the server's 59 tools:
-        // the five self-describing tools belonged to no category, so the listing an
-        // LLM consults to find out what exists omitted the tools that tell it what
-        // exists. They all declare `category: 'meta'` themselves.
+        name: 'comments',
+        description: 'Discuss pages - list, add, reply to, edit, archive and delete page comments',
+        tools: [
+          'bookstack_comments_list',
+          'bookstack_comments_create',
+          'bookstack_comments_read',
+          'bookstack_comments_update',
+          'bookstack_comments_delete',
+        ],
+        use_cases: [
+          'Leave review feedback on a page',
+          'Follow and answer a discussion thread',
+          'Archive resolved comments',
+        ],
+      },
+      {
+        name: 'imports',
+        description:
+          'Import BookStack ZIP exports - upload a ZIP, inspect it, then run it to create its book, chapter or page',
+        tools: [
+          'bookstack_imports_list',
+          'bookstack_imports_create',
+          'bookstack_imports_read',
+          'bookstack_imports_run',
+          'bookstack_imports_delete',
+        ],
+        use_cases: [
+          'Move content between BookStack instances',
+          'Restore a book, chapter or page from a ZIP export',
+        ],
+      },
+      {
+        name: 'tags',
+        description: 'Discover the tag names and values in use across visible content',
+        tools: ['bookstack_tags_list_names', 'bookstack_tags_list_values'],
+        use_cases: [
+          'Learn the tagging vocabulary before tagging new content',
+          'Build [name=value] search filters',
+        ],
+      },
+      {
+        // The self-describing tools all declare `category: 'meta'`.
         name: 'meta',
         description: 'Ask this server about itself - its tools, resources and conventions',
         tools: [
@@ -923,8 +964,33 @@ export class ServerInfoTools {
             description:
               'PDF is binary: content arrives base64-encoded with encoding "base64", and byte_length carries the true file size',
           },
+          {
+            step: 4,
+            action: 'Export a ZIP to move the book to another BookStack',
+            tool_or_resource: 'bookstack_books_export',
+            parameters: { id: 1, format: 'zip' },
+            description:
+              "ZIP is BookStack's portable format, with images and attachments included; like PDF it arrives base64-encoded",
+          },
+          {
+            step: 5,
+            action: 'Upload the ZIP on the target instance',
+            tool_or_resource: 'bookstack_imports_create',
+            parameters: { file: '<base64 content from step 4>' },
+            description:
+              'Validates and stores the ZIP without creating anything; the result names the import id and type',
+          },
+          {
+            step: 6,
+            action: 'Run the import',
+            tool_or_resource: 'bookstack_imports_run',
+            parameters: { id: 1 },
+            description:
+              'Creates the content; a chapter or page import also needs parent_type and parent_id',
+          },
         ],
-        expected_outcome: 'A local copy of the content in a format you can archive or re-import',
+        expected_outcome:
+          'A local copy of the content in a format you can archive, or the same content recreated on another instance',
       },
     ];
   }
@@ -1012,6 +1078,8 @@ export class ServerInfoTools {
           'Create books for major topics',
           'Use chapters to organize pages',
           'Add meaningful descriptions and tags',
+          'Reuse existing tag names: bookstack_tags_list_names shows the vocabulary in use',
+          'Leave review feedback with bookstack_comments_create rather than editing the page',
         ],
         workflow: [
           'Plan structure first',
@@ -1053,6 +1121,7 @@ export class ServerInfoTools {
           'Start broad, then narrow with a {type:...} or tag filter once you see the shape of the results',
           'Search returns previews, not full content - follow up with bookstack_pages_read for the real text',
           'If a search comes back empty, retry with fewer or more general words before concluding nothing exists',
+          'Use bookstack_tags_list_names and bookstack_tags_list_values to find the tag names and values worth filtering on',
         ],
       },
       best_practices: {
@@ -1064,11 +1133,11 @@ export class ServerInfoTools {
         ],
         efficiency: [
           'Use list tools with filters instead of fetching everything and filtering locally',
-          'Use markdown or plaintext exports for LLM context; html and pdf cost far more tokens',
+          'Use markdown or plaintext exports for LLM context; html, pdf and zip cost far more tokens',
           'There is no batch tool: each call handles one item, so prefer a filtered list call over many individual reads, and avoid polling in a loop - outbound calls are rate-limited',
         ],
         safety: [
-          'Deletes are recoverable: entity deletes land in the recycle bin, reachable via bookstack_recyclebin_list',
+          'Book, chapter, page and shelf deletes land in the recycle bin, reachable via bookstack_recyclebin_list; comment and import deletes are permanent',
           'Check bookstack_permissions_read before assuming content is private',
           'Use bookstack_audit_log_list to find out who changed something and when',
         ],

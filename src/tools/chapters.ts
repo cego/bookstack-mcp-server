@@ -449,7 +449,7 @@ export class ChapterTools {
     return {
       name: 'bookstack_chapters_export',
       description:
-        'Export a chapter to a specific format. Includes content from all pages in the chapter. Returns { content, encoding, byte_length, filename, mime_type }: text formats arrive as-is with encoding "utf8", while "pdf" arrives base64-encoded with encoding "base64".',
+        'Export a chapter to a specific format. Includes content from all pages in the chapter. Returns { content, encoding, byte_length, filename, mime_type }: text formats arrive as-is with encoding "utf8", while "pdf" and "zip" arrive base64-encoded with encoding "base64". "zip" is the portable format bookstack_imports_create accepts, and requires BookStack v25.07+.',
       inputSchema: {
         type: 'object',
         required: ['id', 'format'],
@@ -461,8 +461,8 @@ export class ChapterTools {
           },
           format: {
             type: 'string',
-            enum: ['html', 'pdf', 'plaintext', 'markdown'],
-            description: 'Desired format',
+            enum: ['html', 'pdf', 'plaintext', 'markdown', 'zip'],
+            description: 'Desired export format. "zip" requires BookStack v25.07+.',
           },
         },
       },
@@ -476,9 +476,9 @@ export class ChapterTools {
       ],
       usage_patterns: [
         'Use "plaintext" or "markdown" for LLM context injection',
-        'Check `encoding` before using `content`: for "pdf" it is base64 and must be decoded to bytes, not read as text. Use `byte_length` for the real file size - `content.length` counts characters, not bytes.',
+        'Check `encoding` before using `content`: for "pdf" and "zip" it is base64 and must be decoded to bytes, not read as text. Use `byte_length` for the real file size - `content.length` counts characters, not bytes.',
       ],
-      related_tools: ['bookstack_books_export'],
+      related_tools: ['bookstack_books_export', 'bookstack_imports_create'],
       error_codes: [
         {
           code: 'NOT_FOUND',

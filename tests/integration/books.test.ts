@@ -47,11 +47,11 @@ import { PageTools } from '../../src/tools/pages';
 import type {
   Book,
   Chapter,
-  ExportFormat,
   ExportResult,
   ListResponse,
   MCPTool,
   Page,
+  TextExportFormat,
 } from '../../src/types';
 import { ErrorHandler } from '../../src/utils/errors';
 import { Logger } from '../../src/utils/logger';
@@ -173,9 +173,6 @@ async function callTool<T>(provider: ToolProvider, name: string, params: unknown
 function uniqueName(label: string): string {
   return `itest-books-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
-
-/** Every export format whose payload is text rather than binary. */
-type TextExportFormat = Exclude<ExportFormat, 'pdf'>;
 
 /**
  * What the client must report per text format. BookStack labels every export

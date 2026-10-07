@@ -548,6 +548,117 @@ export interface AuditLogEntry {
   user: UserSummary;
 }
 
+/** A comment from create, update or list; only a read includes `html`. */
+export interface Comment {
+  id: number;
+  /** The page the comment is on. */
+  commentable_id: number;
+  /** 'page': BookStack only supports comments on pages. */
+  commentable_type: string;
+  /** The `local_id` of the comment this replies to, on the same page; null at top level. */
+  parent_id: number | null;
+  /** Numbers the comment within its page, from 1. */
+  local_id: number;
+  /** The page text the comment is anchored to, or '' when it is not anchored. */
+  content_ref: string;
+  created_by: number;
+  updated_by: number;
+  created_at: string;
+  updated_at: string;
+  /** Absent from list responses. */
+  archived?: boolean;
+  /** The page, attached by an update that changed `html` or `archived`. */
+  entity?: CommentEntity;
+}
+
+/** The page a comment is on, as BookStack embeds it in an update response. */
+export interface CommentEntity {
+  id: number;
+  /** 'page'. */
+  type: string;
+  name: string;
+  slug: string;
+  book_id: number;
+  chapter_id: number | null;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  created_by: number;
+  updated_by: number;
+  owned_by: number;
+  page_id: number;
+  draft: boolean;
+  template: boolean;
+  revision_count: number;
+  editor: string;
+}
+
+/** A direct reply, as embedded in `CommentDetail.replies`. */
+export interface CommentReply extends Omit<Comment, 'entity'> {
+  html: string;
+  archived: boolean;
+}
+
+/** A comment as returned by `GET /api/comments/{id}`, with its direct replies. */
+export interface CommentDetail extends Omit<Comment, 'created_by' | 'updated_by' | 'entity'> {
+  created_by: UserSummary;
+  updated_by: UserSummary;
+  html: string;
+  archived: boolean;
+  replies: CommentReply[];
+}
+
+/** What a ZIP import will create once run. */
+export type ImportType = 'book' | 'chapter' | 'page';
+
+/** A pending ZIP import as returned by `GET /api/imports`. */
+export interface Import {
+  id: number;
+  /** The name of the top-level item in the ZIP. */
+  name: string;
+  /** ZIP size in bytes. */
+  size: number;
+  type: ImportType;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A pending ZIP import as returned by `POST /api/imports`, with its storage path. */
+export interface ImportCreateResult extends Import {
+  path: string;
+}
+
+/** A pending ZIP import as returned by `GET /api/imports/{id}`; `details` is shaped by `type`. */
+export interface ImportDetail extends ImportCreateResult {
+  details: Record<string, unknown> | null;
+}
+
+/** What `POST /api/imports/{id}` returns: the created book, chapter or page. */
+export type ImportRunResult = Book | Chapter | Page;
+
+/** The usage counts both tag listings carry. */
+interface TagUsageCounts {
+  usages: number;
+  page_count: number;
+  chapter_count: number;
+  book_count: number;
+  shelf_count: number;
+}
+
+/** An entry of `GET /api/tags/names`. */
+export interface TagNameSummary extends TagUsageCounts {
+  name: string;
+  /** How many distinct values the name is used with. */
+  values: number;
+}
+
+/** An entry of `GET /api/tags/values-for-name`. */
+export interface TagValueSummary extends TagUsageCounts {
+  name: string;
+  value: string;
+}
+
 /**
  * The payload of `GET /api/system`.
  *
@@ -755,6 +866,41 @@ export interface SearchParams {
   query: string;
   page?: number;
   count?: number;
+}
+
+export interface CommentsListParams extends PaginationParams {
+  filter?: {
+    commentable_id?: number;
+    commentable_type?: 'page';
+    parent_id?: number;
+    local_id?: number;
+    content_ref?: string;
+    created_by?: number;
+    updated_by?: number;
+  };
+}
+
+export interface ImportsListParams extends PaginationParams {
+  filter?: {
+    name?: string;
+    size?: number;
+    type?: ImportType;
+    created_by?: number;
+  };
+}
+
+export interface TagNamesListParams extends PaginationParams {
+  filter?: {
+    name?: string;
+  };
+}
+
+/** `name` is the tag name whose values are listed, sent as a query parameter. */
+export interface TagValuesListParams extends PaginationParams {
+  name: string;
+  filter?: {
+    value?: string;
+  };
 }
 
 export interface ImageGalleryListParams extends PaginationParams {
@@ -1052,6 +1198,31 @@ export interface UpdateImageParams {
   file_path?: string; // server-local path, read by the server (access-controlled)
 }
 
+export interface CreateCommentParams {
+  page_id: number;
+  html: string;
+  /** The `local_id` of the comment to reply to, on the same page. */
+  reply_to?: number;
+  /** See COMMENT_CONTENT_REF_PATTERN. */
+  content_ref?: string;
+}
+
+export interface UpdateCommentParams {
+  html?: string;
+  archived?: boolean;
+}
+
+/** Exactly one source for the ZIP; `file_path` is read by this server, never forwarded. */
+export type CreateImportParams =
+  | { file: string; file_path?: undefined }
+  | { file_path: string; file?: undefined };
+
+/** Required by BookStack for a chapter or page import, and ignored for a book import. */
+export interface RunImportParams {
+  parent_type?: 'book' | 'chapter';
+  parent_id?: number;
+}
+
 /**
  * The fallback (non-role-specific) permission block.
  *
@@ -1273,6 +1444,15 @@ export function trimmedMinLengthPattern(min: number): string {
  */
 export const LANGUAGE_PATTERN = '^[A-Za-z0-9_-]+$';
 
+/** CommentRepo::create()'s content_ref format; BookStack stores anything else as ''. */
+export const COMMENT_CONTENT_REF_PATTERN = '^bkmrk-(.*?):\\d+:(\\d*-\\d*)?$';
+
+/** The documented upload ceiling of 50000 KB, in bytes. */
+export const UPLOAD_MAX_BYTES = 50_000 * 1024;
+
+/** Padded base64 length of UPLOAD_MAX_BYTES (68,266,668 characters). */
+export const UPLOAD_MAX_BASE64_LENGTH = Math.ceil(UPLOAD_MAX_BYTES / 3) * 4;
+
 /**
  * Close an input schema: every object within it forbids unknown properties.
  *
@@ -1364,7 +1544,13 @@ export interface ResourceExample {
 }
 
 // Export format types
-export type ExportFormat = 'html' | 'pdf' | 'plaintext' | 'markdown';
+export type ExportFormat = 'html' | 'pdf' | 'plaintext' | 'markdown' | 'zip';
+
+/** Formats whose bytes are binary, so an export of them is returned base64-encoded. */
+export type BinaryExportFormat = 'pdf' | 'zip';
+
+/** Formats whose payload is text, so an export of them is returned as UTF-8. */
+export type TextExportFormat = Exclude<ExportFormat, BinaryExportFormat>;
 
 /**
  * The result of an export.
@@ -1374,7 +1560,7 @@ export type ExportFormat = 'html' | 'pdf' | 'plaintext' | 'markdown';
  * payload, and `encoding` is what tells them apart:
  *
  *  - `utf8`   - `content` is the text itself (html, plaintext, markdown).
- *  - `base64` - `content` is the base64 encoding of binary bytes (pdf).
+ *  - `base64` - `content` is the base64 encoding of binary bytes (pdf, zip).
  *               Text-decoding those bytes would corrupt them irrecoverably.
  *
  * `content.length` is a count of *characters*, which for base64 is neither the
@@ -1462,6 +1648,24 @@ export interface BookStackAPIClient {
   getImage(id: number): Promise<ImageDetail>;
   updateImage(id: number, params: UpdateImageParams): Promise<ImageDetail>;
   deleteImage(id: number): Promise<void>;
+
+  // Comments
+  listComments(params?: CommentsListParams): Promise<ListResponse<Comment>>;
+  createComment(params: CreateCommentParams): Promise<Comment>;
+  getComment(id: number): Promise<CommentDetail>;
+  updateComment(id: number, params: UpdateCommentParams): Promise<Comment>;
+  deleteComment(id: number): Promise<void>;
+
+  // Imports
+  listImports(params?: ImportsListParams): Promise<ListResponse<Import>>;
+  createImport(params: CreateImportParams): Promise<ImportCreateResult>;
+  getImport(id: number): Promise<ImportDetail>;
+  runImport(id: number, params: RunImportParams): Promise<ImportRunResult>;
+  deleteImport(id: number): Promise<void>;
+
+  // Tags
+  listTagNames(params?: TagNamesListParams): Promise<ListResponse<TagNameSummary>>;
+  listTagValues(params: TagValuesListParams): Promise<ListResponse<TagValueSummary>>;
 
   // Search
   search(params: SearchParams): Promise<ListResponse<SearchResult>>;

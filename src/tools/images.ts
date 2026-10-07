@@ -3,6 +3,7 @@ import {
   type CreateImageParams,
   type ImageGalleryListParams,
   type MCPTool,
+  UPLOAD_MAX_BASE64_LENGTH,
   type UpdateImageParams,
   withClosedSchemas,
 } from '../types';
@@ -164,6 +165,7 @@ export class ImageTools {
           image: {
             type: 'string',
             minLength: 1,
+            maxLength: UPLOAD_MAX_BASE64_LENGTH,
             description:
               'Base64 encoded image content. Supply this or file_path, not both. Must be a JPEG, PNG, GIF, WebP or AVIF, and at most 50000 KB.',
           },
@@ -344,6 +346,7 @@ export class ImageTools {
           image: {
             type: 'string',
             minLength: 1,
+            maxLength: UPLOAD_MAX_BASE64_LENGTH,
             description:
               'New Base64 encoded image content (Replaces existing image). Supply this or file_path, not both. Should be the same file type as the original image, and at most 50000 KB.',
           },

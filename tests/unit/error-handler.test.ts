@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { ErrorHandler } from '../../src/utils/errors';
+import { ErrorHandler, UploadRefusedError } from '../../src/utils/errors';
 import type { Logger } from '../../src/utils/logger';
 import { PageContentError, PageStaleError } from '../../src/utils/page-content';
 
@@ -83,6 +83,20 @@ describe('ErrorHandler tool error results', () => {
 
     const { data } = readToolError(result);
     expect(data).toEqual({ type: 'concurrent_modification', matched_sections: ['Setup'] });
+  });
+
+  it('reports a refused file_path as a validation error on file_path', () => {
+    const refusal = new UploadRefusedError("'file_path' must name a readable file.");
+
+    const handled = handler.handleError(refusal);
+    const { message, data } = readToolError(handler.toToolErrorResult(refusal));
+
+    expect(handled.code).toBe(ErrorCode.InvalidParams);
+    expect(message).toBe("'file_path' must name a readable file.");
+    expect(data).toEqual({
+      type: 'validation_error',
+      validation: [{ field: 'file_path', message: "'file_path' must name a readable file." }],
+    });
   });
 
   it('drops the JSON-RPC code prefix from the message', () => {

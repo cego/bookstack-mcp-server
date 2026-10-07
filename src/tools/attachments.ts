@@ -3,6 +3,7 @@ import {
   type AttachmentsListParams,
   type CreateAttachmentParams,
   type MCPTool,
+  UPLOAD_MAX_BASE64_LENGTH,
   type UpdateAttachmentParams,
   withClosedSchemas,
 } from '../types';
@@ -174,6 +175,7 @@ export class AttachmentTools {
           file: {
             type: 'string',
             minLength: 1,
+            maxLength: UPLOAD_MAX_BASE64_LENGTH,
             description:
               'Base64 encoded file content, at most 50000 KB. Mutually exclusive with file_path and link.',
           },
@@ -353,6 +355,7 @@ export class AttachmentTools {
           file: {
             type: 'string',
             minLength: 1,
+            maxLength: UPLOAD_MAX_BASE64_LENGTH,
             description:
               'New Base64 encoded file content (Replaces existing file), at most 50000 KB. Mutually exclusive with file_path and link.',
           },

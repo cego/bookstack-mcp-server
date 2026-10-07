@@ -1,21 +1,21 @@
 # BookStack MCP Server Tools Overview
 
-## All 59 Tools Across 13 Categories
+## All 71 Tools Across 16 Categories
 
 This document provides an overview of every tool implemented in the BookStack MCP server, its capabilities, usage patterns, and implementation details.
 
 ## Executive Summary
 
-The BookStack MCP Server provides **59 tools** (plus **5 resources** and **6 resource templates**) organized into **13 categories**, implementing the supported subset of the BookStack knowledge management API. Each tool follows consistent patterns for validation, error handling, and logging.
+The BookStack MCP Server provides **71 tools** (plus **5 resources** and **6 resource templates**) organized into **16 categories**, implementing the supported subset of the BookStack knowledge management API. Each tool follows consistent patterns for validation, error handling, and logging.
 
 The categories below are the ones returned by `bookstack_tool_categories`, and the
-per-category counts add up to the 59 tools the server registers at boot (it logs
-`Registered 59 tools` / `Registered 5 resources and 6 resource templates` on startup):
+per-category counts add up to the 71 tools the server registers at boot (it logs
+`Registered 71 tools` / `Registered 5 resources and 6 resource templates` on startup):
 
 | Section | Category | Tools |
 |---------|----------|-------|
 | 1 | `books` | 6 |
-| 2 | `pages` | 6 |
+| 2 | `pages` | 9 |
 | 3 | `chapters` | 6 |
 | 4 | `shelves` | 5 |
 | 5 | `users` | 5 |
@@ -26,8 +26,11 @@ per-category counts add up to the 59 tools the server registers at boot (it logs
 | 10 | `recyclebin` | 3 |
 | 11 | `permissions` | 2 |
 | 12 | `system` | 2 |
-| 13 | `meta` | 5 |
-| | **Total** | **56** |
+| 13 | `comments` | 5 |
+| 14 | `imports` | 5 |
+| 15 | `tags` | 2 |
+| 16 | `meta` | 5 |
+| | **Total** | **71** |
 
 ## Tool Categories Overview
 
@@ -42,7 +45,7 @@ per-category counts add up to the 59 tools the server registers at boot (it logs
 | `bookstack_books_read` | Get complete book details including hierarchy | id (required) |
 | `bookstack_books_update` | Update book details and settings | id (required), name, description, tags, default_template_id |
 | `bookstack_books_delete` | Delete book (moves to recycle bin) | id (required) |
-| `bookstack_books_export` | Export book in various formats | id (required), format (html/pdf/plaintext/markdown) |
+| `bookstack_books_export` | Export book in various formats | id (required), format (html/pdf/plaintext/markdown/zip) |
 
 **Usage Patterns**:
 - Call `list` first to understand available documentation structure
@@ -63,7 +66,7 @@ per-category counts add up to the 59 tools the server registers at boot (it logs
 | `bookstack_pages_append` | Add content at a page or section boundary | id (required), content (required), position, section, separator, dry_run, expected_updated_at |
 | `bookstack_pages_outline` | Heading structure with offsets and section sizes | id (required) |
 | `bookstack_pages_delete` | Delete page (moves to recycle bin) | id (required) |
-| `bookstack_pages_export` | Export page in various formats | id (required), format (html/pdf/plaintext/markdown) |
+| `bookstack_pages_export` | Export page in various formats | id (required), format (html/pdf/plaintext/markdown/zip) |
 
 **Content Support**:
 - HTML and Markdown formats
@@ -118,7 +121,7 @@ No response from these tools contains page content, which is what keeps it out o
 | `bookstack_chapters_read` | Get chapter details including all pages | id (required) |
 | `bookstack_chapters_update` | Update chapter details and move between books | id (required), name, description, book_id, tags, priority |
 | `bookstack_chapters_delete` | Delete chapter and all pages | id (required) |
-| `bookstack_chapters_export` | Export chapter with all pages | id (required), format (html/pdf/plaintext/markdown) |
+| `bookstack_chapters_export` | Export chapter with all pages | id (required), format (html/pdf/plaintext/markdown/zip) |
 
 **Organizational Features**:
 - Priority-based ordering within books
@@ -323,7 +326,57 @@ bookstack_audit_log_list({ filter: { loggable_type: "page", loggable_id: 42 } })
 - Requires a token whose user can manage both users and system settings
 - Purging an item from the recycle bin nulls `loggable_id`/`loggable_type` on its entries and moves the item's name into `detail` — so purged content is traceable only by `type` + `detail`
 
-### 13. Meta / Self-Description (5 tools)
+### 13. Comment Management (5 tools)
+**Category**: `comments`  
+**Purpose**: Discuss pages through comments and replies
+
+| Tool Name | Description | Key Parameters |
+|-----------|-------------|----------------|
+| `bookstack_comments_list` | List comments on visible pages | count, offset, sort, filter (commentable_id, commentable_type, parent_id, local_id, content_ref, created_by, updated_by) |
+| `bookstack_comments_create` | Comment on a page or reply to a comment | page_id (required), html (required), reply_to, content_ref |
+| `bookstack_comments_read` | Get a comment with its HTML and direct replies | id (required) |
+| `bookstack_comments_update` | Edit, archive or unarchive a comment | id (required), html, archived |
+| `bookstack_comments_delete` | Permanently delete a comment | id (required) |
+
+**Comment Features**:
+- `local_id` numbers a comment within its page; `parent_id` and `reply_to` use it, not the global `id`
+- Only top-level comments can be archived
+- Listings omit `html` and `archived`; read a comment for both
+- `content_ref` anchors a comment to page text and must match BookStack's `bkmrk-...` format
+
+### 14. ZIP Imports (5 tools)
+**Category**: `imports`  
+**Purpose**: Import BookStack's portable ZIP exports
+
+| Tool Name | Description | Key Parameters |
+|-----------|-------------|----------------|
+| `bookstack_imports_list` | List pending imports | count, offset, sort, filter (name, size, type, created_by) |
+| `bookstack_imports_create` | Upload and validate a ZIP without importing it | file (base64) or file_path, exactly one |
+| `bookstack_imports_read` | Get a pending import with details of its content | id (required) |
+| `bookstack_imports_run` | Create the content held in a pending import | id (required), parent_type + parent_id (together) |
+| `bookstack_imports_delete` | Discard a pending import | id (required) |
+
+**Import Features**:
+- Requires the BookStack `content-import` permission
+- A ZIP from any `*_export` tool with `format: "zip"` can be imported
+- Chapter imports need a book parent; page imports need a book or chapter parent; book imports take none
+- `file_path` is read by this server and needs `BOOKSTACK_UPLOAD_ROOT`, like the other upload tools
+
+### 15. Tags (2 tools)
+**Category**: `tags`  
+**Purpose**: Discover the tag vocabulary in use
+
+| Tool Name | Description | Key Parameters |
+|-----------|-------------|----------------|
+| `bookstack_tags_list_names` | List tag names with value and usage counts | count, offset, sort, filter (name) |
+| `bookstack_tags_list_values` | List the values of one tag name with usage counts | name (required), count, offset, sort, filter (value) |
+
+**Tag Features**:
+- Counts cover only content visible to the authenticated user
+- Tags are set through the `tags` of books, chapters, pages and shelves; there is no tag write endpoint
+- Feeds `[name=value]` filters in `bookstack_search`
+
+### 16. Meta / Self-Description (5 tools)
 **Category**: `meta`  
 **Purpose**: Ask the server about itself
 
@@ -331,7 +384,7 @@ bookstack_audit_log_list({ filter: { loggable_type: "page", loggable_id: 42 } })
 |-----------|-------------|----------------|
 | `bookstack_server_info` | Get comprehensive MCP server information | section (all/capabilities/tools/resources/examples/errors) |
 | `bookstack_tool_categories` | Get detailed tool category information | category |
-| `bookstack_usage_examples` | Get workflow examples | workflow (create_documentation/organize_content/user_management/search_content/export_data) |
+| `bookstack_usage_examples` | Get workflow examples | workflow (create_documentation/edit_part_of_large_page/organize_content/user_management/search_content/export_data) |
 | `bookstack_error_guides` | Get error handling guidance | error_code (UNAUTHORIZED/NOT_FOUND/VALIDATION_ERROR) |
 | `bookstack_help` | Interactive help system | topic, context |
 
@@ -480,6 +533,9 @@ Each tool category is implemented as a separate class:
 - **RoleTools**: Permission management
 - **AttachmentTools**: File attachment handling
 - **ImageTools**: Image gallery management
+- **CommentTools**: Page comments
+- **ImportTools**: ZIP imports
+- **TagTools**: Tag listings
 - **SearchTools**: Content search
 - **RecycleBinTools**: Deletion recovery
 - **PermissionTools**: Access control
@@ -537,7 +593,7 @@ Each tool follows the same pattern:
 - Filter results at the API level with a list tool's `filter`, rather than fetching everything and filtering locally
 - **There is no batch tool and no batching layer** (`supports_batch_operations: false`): every tool acts on a single item, so prefer one filtered list call over many individual reads
 - **The server caches nothing** (`supports_caching: false`): every call goes through to BookStack, so avoid polling loops — outbound requests are rate-limited
-- Prefer `markdown`/`plaintext` exports for LLM context; `html` and `pdf` cost far more tokens
+- Prefer `markdown`/`plaintext` exports for LLM context; `html`, `pdf` and `zip` cost far more tokens
 
 ### Error Handling
 - Always validate inputs before API calls
@@ -568,8 +624,11 @@ below. It is not a complete mapping of every endpoint.
 - ✅ **User Management**: User and role administration
 - ✅ **Permission System**: Content-level permission overrides
 - ✅ **File Management**: Attachments and image gallery
+- ✅ **Comments**: `/api/comments` (list, create, read, update, delete)
+- ✅ **Imports**: `/api/imports` (list, create, read, run, delete)
+- ✅ **Tags**: `/api/tags/names`, `/api/tags/values-for-name`
 - ✅ **Search**: `GET /api/search`
-- ✅ **Export**: `html`, `pdf`, `plaintext`, `markdown`
+- ✅ **Export**: `html`, `pdf`, `plaintext`, `markdown`, `zip`
 - ✅ **Audit**: `GET /api/audit-log`
 - ✅ **System**: `GET /api/system`
 - ✅ **Recycle bin**: list, restore, purge
@@ -577,11 +636,7 @@ below. It is not a complete mapping of every endpoint.
 **Not exposed** (present in the BookStack API, no tool here — checked against
 v26.05.2 `docs.json`):
 
-- ❌ **Comments** — `/api/comments` (list, create, read, update, delete)
-- ❌ **Imports** — `/api/imports` (list, create, read, run, delete)
-- ❌ **Tags** — `/api/tags/names`, `/api/tags/values-for-name`
 - ❌ **Image data** — `/api/image-gallery/{id}/data`, `/api/image-gallery/url/data`
-- ❌ **ZIP export** — `/export/zip` on books, chapters and pages
 
 If you need one of these, call the BookStack API directly.
 
@@ -595,6 +650,6 @@ The modular architecture allows for easy extension:
 
 ## Conclusion
 
-The BookStack MCP Server is a production-ready implementation providing LLMs with access to the supported subset of BookStack's API. With 59 tools across 13 categories, 5 resources and 6 resource templates, robust error handling, strict validation, and extensive documentation, it enables sophisticated knowledge management workflows while maintaining security and reliability.
+The BookStack MCP Server is a production-ready implementation providing LLMs with access to the supported subset of BookStack's API. With 71 tools across 16 categories, 5 resources and 6 resource templates, robust error handling, strict validation, and extensive documentation, it enables sophisticated knowledge management workflows while maintaining security and reliability.
 
 The consistent patterns, extensive examples, and self-documenting capabilities make it easy for LLMs to understand and effectively utilize the full power of the BookStack platform through the MCP protocol.

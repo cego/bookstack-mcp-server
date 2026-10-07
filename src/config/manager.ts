@@ -198,7 +198,7 @@ const AuthModeSchema = z
  * Settings that exist only for the HTTP transport.
  *
  * Deliberately kept out of `ConfigSchema`: `Config` is handed to the BookStack client,
- * the validator and all 59 tools, and is merged per request in the /message handler
+ * the validator and all 71 tools, and is merged per request in the /message handler
  * (`Partial<Config>` overrides). The inbound secret has no business travelling with it,
  * and the body ceiling means nothing under stdio.
  */

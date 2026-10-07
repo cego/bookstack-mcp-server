@@ -36,7 +36,9 @@ import { AttachmentTools } from './tools/attachments';
 import { AuditTools } from './tools/audit';
 import { BookTools } from './tools/books';
 import { ChapterTools } from './tools/chapters';
+import { CommentTools } from './tools/comments';
 import { ImageTools } from './tools/images';
+import { ImportTools } from './tools/imports';
 import { PageTools } from './tools/pages';
 import { PermissionTools } from './tools/permissions';
 import { RecycleBinTools } from './tools/recyclebin';
@@ -45,6 +47,7 @@ import { SearchTools } from './tools/search';
 import { ServerInfoTools } from './tools/server-info';
 import { ShelfTools } from './tools/shelves';
 import { SystemTools } from './tools/system';
+import { TagTools } from './tools/tags';
 import { UserTools } from './tools/users';
 import type { MCPResource, MCPSchemaNode, MCPTool } from './types';
 import { ErrorHandler } from './utils/errors';
@@ -125,10 +128,10 @@ function splitArgumentNames(tool: MCPTool, args: unknown): { known: string[]; un
  * through the Model Context Protocol (MCP).
  *
  * Features:
- * - 59 tools across the supported subset of the BookStack API: books, chapters, pages,
- *   shelves, users, roles, attachments, image gallery, search, recycle bin, content
- *   permissions, the audit log and system info. Not every endpoint family is exposed -
- *   comments, imports, tags, image-gallery `data` and ZIP export are not.
+ * - 71 tools across the supported subset of the BookStack API: books, chapters, pages,
+ *   shelves, users, roles, attachments, image gallery, comments, ZIP imports, tags, search,
+ *   recycle bin, content permissions, the audit log and system info, with html, pdf,
+ *   plaintext, markdown and ZIP exports. Image-gallery `data` is not exposed.
  * - 5 resources and 6 resource templates for read-only content access
  * - Comprehensive error handling and validation
  * - Rate limiting and retry policies
@@ -232,6 +235,9 @@ export class BookStackMCPServer {
       new RoleTools(this.client, this.validator, this.logger),
       new AttachmentTools(this.client, this.validator, this.logger),
       new ImageTools(this.client, this.validator, this.logger),
+      new CommentTools(this.client, this.validator, this.logger),
+      new ImportTools(this.client, this.validator, this.logger),
+      new TagTools(this.client, this.validator, this.logger),
       new SearchTools(this.client, this.validator, this.logger),
       new RecycleBinTools(this.client, this.validator, this.logger),
       new PermissionTools(this.client, this.validator, this.logger),
@@ -563,7 +569,7 @@ export class BookStackMCPServer {
  */
 export const MISSING_AUTH_TOKEN_MESSAGE =
   'MCP_AUTH_TOKEN is not set. The HTTP transport refuses to start without an inbound ' +
-  'secret, because POST /message dispatches all 59 tools - including permanent-delete, ' +
+  'secret, because POST /message dispatches all 71 tools - including permanent-delete, ' +
   'user, role and permission operations - using the configured BOOKSTACK_API_TOKEN. ' +
   'Set MCP_AUTH_TOKEN to a random secret (e.g. `openssl rand -hex 32`) and send it as ' +
   '"Authorization: Bearer <token>", or use MCP_TRANSPORT=stdio, which has no network ' +
@@ -996,7 +1002,7 @@ export function createHttpApp(options: HttpAppOptions): express.Express {
    *
    * Built from the app's own config rather than re-reading the singleton, so the readiness
    * probe reports on the BookStack this app was actually configured with. Cached across
-   * requests because constructing one registers all 59 tools, 5 resources and 6 resource
+   * requests because constructing one registers all 71 tools, 5 resources and 6 resource
    * templates - work an anonymous caller must not be able to trigger per request.
    */
   function healthServer(): BookStackMCPServer {

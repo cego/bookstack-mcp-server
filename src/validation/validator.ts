@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import {
+  COMMENT_CONTENT_REF_PATTERN,
   type ContentType,
   type ExportFormat,
   LANGUAGE_PATTERN,
   NONBLANK_PATTERN,
   trimmedMinLengthPattern,
+  UPLOAD_MAX_BASE64_LENGTH,
 } from '../types';
 import { Logger } from '../utils/logger';
 
@@ -124,6 +126,27 @@ const language = z
   .regex(
     new RegExp(LANGUAGE_PATTERN),
     'language may only contain letters, numbers, dashes and underscores'
+  );
+
+/** A comment's `content_ref`, compiled from the published pattern. */
+const commentContentRef = z
+  .string()
+  .max(255)
+  .regex(
+    new RegExp(COMMENT_CONTENT_REF_PATTERN),
+    "content_ref must look like 'bkmrk-<element id>:<hash>:<start>-<end>': BookStack stores any other value as ''"
+  );
+
+/** A comment body: required upstream, so it must hold a non-whitespace character. */
+const commentHtml = z.string().min(1).regex(NONBLANK, NONBLANK_MESSAGE);
+
+/** Inline base64 upload content, capped at the documented 50000 KB. */
+const base64Upload = z
+  .string()
+  .min(1)
+  .max(
+    UPLOAD_MAX_BASE64_LENGTH,
+    `must decode to at most 50000 KB (${UPLOAD_MAX_BASE64_LENGTH} base64 characters)`
   );
 
 /** `count` on a listing. 500 is BookStack's own maximum, and it REJECTS more (see below). */
@@ -738,7 +761,7 @@ const ValidationSchemas = {
     .strictObject({
       uploaded_to: entityId,
       name: z.string().min(1).max(255),
-      file: z.string().min(1).optional(), // base64 encoded
+      file: base64Upload.optional(),
       file_path: z.string().min(1).optional(), // server-local path
       link: z.string().url().max(2000).optional(),
     })
@@ -766,7 +789,7 @@ const ValidationSchemas = {
       id: entityId,
       uploaded_to: entityId.optional(),
       name: z.string().min(1).max(255).optional(),
-      file: z.string().min(1).optional(), // base64 encoded
+      file: base64Upload.optional(),
       file_path: z.string().min(1).optional(), // server-local path
       link: z.string().url().max(2000).optional(),
     })
@@ -807,7 +830,7 @@ const ValidationSchemas = {
   imageCreate: z
     .strictObject({
       name: z.string().min(1).max(180).optional(),
-      image: z.string().min(1).optional(), // base64 encoded
+      image: base64Upload.optional(),
       file_path: z.string().min(1).optional(), // server-local path
       type: z.enum(['gallery', 'drawio']).default('gallery'),
       uploaded_to: entityId, // required by BookStack
@@ -823,12 +846,184 @@ const ValidationSchemas = {
     .strictObject({
       id: entityId,
       name: z.string().min(1).max(180).optional(),
-      image: z.string().min(1).optional(), // base64 encoded
+      image: base64Upload.optional(),
       file_path: z.string().min(1).optional(), // server-local path
     })
     .refine((data) => !(data.image && data.file_path), {
       message: 'Provide either image (base64 content) or file_path (a server-local path), not both',
     }),
+
+  // Comments: sorts are every field CommentApiController::list() exposes, upstream default `id`.
+  commentsList: z.strictObject({
+    count: listCount,
+    offset: listOffset,
+    sort: z
+      .enum([
+        'id',
+        'commentable_id',
+        'commentable_type',
+        'parent_id',
+        'local_id',
+        'content_ref',
+        'created_by',
+        'updated_by',
+        'created_at',
+        'updated_at',
+        '-id',
+        '-commentable_id',
+        '-commentable_type',
+        '-parent_id',
+        '-local_id',
+        '-content_ref',
+        '-created_by',
+        '-updated_by',
+        '-created_at',
+        '-updated_at',
+      ])
+      .default('id'),
+    filter: z
+      .strictObject({
+        commentable_id: entityId.optional(),
+        commentable_type: z.enum(['page']).optional(),
+        parent_id: entityId.optional(),
+        local_id: entityId.optional(),
+        content_ref: z.string().optional(),
+        created_by: entityId.optional(),
+        updated_by: entityId.optional(),
+      })
+      .optional(),
+  }),
+
+  commentCreate: z.strictObject({
+    page_id: entityId,
+    html: commentHtml,
+    reply_to: entityId.optional(),
+    content_ref: commentContentRef.optional(),
+  }),
+
+  // `html` is nonblank here too: BookStack would store a blank update as an empty comment.
+  commentUpdate: z
+    .strictObject({
+      id: entityId,
+      html: commentHtml.optional(),
+      archived: z.boolean().optional(),
+    })
+    .refine((data) => data.html !== undefined || data.archived !== undefined, {
+      message: 'Provide html, archived, or both: an update with neither changes nothing',
+    }),
+
+  // Imports: sorts are every field ImportApiController::list() exposes, upstream default `id`.
+  importsList: z.strictObject({
+    count: listCount,
+    offset: listOffset,
+    sort: z
+      .enum([
+        'id',
+        'name',
+        'size',
+        'type',
+        'created_by',
+        'created_at',
+        'updated_at',
+        '-id',
+        '-name',
+        '-size',
+        '-type',
+        '-created_by',
+        '-created_at',
+        '-updated_at',
+      ])
+      .default('id'),
+    filter: z
+      .strictObject({
+        name: z.string().optional(),
+        size: z.number().int().min(0).optional(),
+        type: z.enum(['book', 'chapter', 'page']).optional(),
+        created_by: entityId.optional(),
+      })
+      .optional(),
+  }),
+
+  importCreate: z
+    .strictObject({
+      file: base64Upload.optional(),
+      file_path: z.string().min(1).optional(), // server-local path
+    })
+    .refine((data) => Boolean(data.file || data.file_path), {
+      message: 'Either file (base64 content) or file_path (a server-local path) is required',
+    })
+    .refine((data) => !(data.file && data.file_path), {
+      message: 'Provide either file (base64 content) or file_path (a server-local path), not both',
+    }),
+
+  importRun: z
+    .strictObject({
+      id: entityId,
+      parent_type: z.enum(['book', 'chapter']).optional(),
+      parent_id: entityId.optional(),
+    })
+    .refine((data) => (data.parent_type === undefined) === (data.parent_id === undefined), {
+      message: 'Send parent_type and parent_id together, or neither',
+    }),
+
+  // Tags: names filter only on `name`, values only on `value` (TagApiController).
+  tagNamesList: z.strictObject({
+    count: listCount,
+    offset: listOffset,
+    sort: z
+      .enum([
+        'name',
+        'values',
+        'usages',
+        'page_count',
+        'chapter_count',
+        'book_count',
+        'shelf_count',
+        '-name',
+        '-values',
+        '-usages',
+        '-page_count',
+        '-chapter_count',
+        '-book_count',
+        '-shelf_count',
+      ])
+      .default('name'),
+    filter: z
+      .strictObject({
+        name: z.string().optional(),
+      })
+      .optional(),
+  }),
+
+  // Defaults to `value`: upstream falls back to `name`, which is the same on every row here.
+  tagValuesList: z.strictObject({
+    name: z.string().min(1).regex(NONBLANK, NONBLANK_MESSAGE),
+    count: listCount,
+    offset: listOffset,
+    sort: z
+      .enum([
+        'name',
+        'value',
+        'usages',
+        'page_count',
+        'chapter_count',
+        'book_count',
+        'shelf_count',
+        '-name',
+        '-value',
+        '-usages',
+        '-page_count',
+        '-chapter_count',
+        '-book_count',
+        '-shelf_count',
+      ])
+      .default('value'),
+    filter: z
+      .strictObject({
+        value: z.string().optional(),
+      })
+      .optional(),
+  }),
 
   // Search
   // BookStack's search caps `count` at 100 rather than the 500 the listings allow.
@@ -927,7 +1122,7 @@ const ValidationSchemas = {
   // Export
   export: z.strictObject({
     id: entityId,
-    format: z.enum(['html', 'pdf', 'plaintext', 'markdown']),
+    format: z.enum(['html', 'pdf', 'plaintext', 'markdown', 'zip']),
   }),
 
   // Generic ID parameter

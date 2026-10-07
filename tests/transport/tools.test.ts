@@ -19,7 +19,13 @@ import type { AddressInfo } from 'node:net';
 import Ajv from 'ajv';
 import { type Config, ConfigManager } from '../../src/config/manager';
 import { createHttpApp } from '../../src/server';
-import { type BookStackStub, STUB_BOOKS, startBookStackStub } from './stub-bookstack';
+import {
+  type BookStackStub,
+  type RecordedRequest,
+  STUB_BOOKS,
+  STUB_ZIP_BYTES,
+  startBookStackStub,
+} from './stub-bookstack';
 
 const TEST_AUTH_TOKEN = 'tools-inbound-secret-0123456789';
 const BODY_LIMIT_BYTES = 1024 * 1024;
@@ -51,6 +57,11 @@ const EXPECTED_TOOLS = [
   'bookstack_chapters_list',
   'bookstack_chapters_read',
   'bookstack_chapters_update',
+  'bookstack_comments_create',
+  'bookstack_comments_delete',
+  'bookstack_comments_list',
+  'bookstack_comments_read',
+  'bookstack_comments_update',
   'bookstack_error_guides',
   'bookstack_help',
   'bookstack_images_create',
@@ -58,6 +69,11 @@ const EXPECTED_TOOLS = [
   'bookstack_images_list',
   'bookstack_images_read',
   'bookstack_images_update',
+  'bookstack_imports_create',
+  'bookstack_imports_delete',
+  'bookstack_imports_list',
+  'bookstack_imports_read',
+  'bookstack_imports_run',
   'bookstack_pages_append',
   'bookstack_pages_create',
   'bookstack_pages_delete',
@@ -85,6 +101,8 @@ const EXPECTED_TOOLS = [
   'bookstack_shelves_read',
   'bookstack_shelves_update',
   'bookstack_system_info',
+  'bookstack_tags_list_names',
+  'bookstack_tags_list_values',
   'bookstack_tool_categories',
   'bookstack_usage_examples',
   'bookstack_users_create',
@@ -181,6 +199,15 @@ function toolError(reply: JsonRpcReply): { message: string; data: Record<string,
     message: text.slice(0, split),
     data: JSON.parse(text.slice(split + 2)) as Record<string, unknown>,
   };
+}
+
+/** The JSON an export handler returns, once unwrapped from MCP's text content. */
+interface ExportPayload {
+  content: string;
+  encoding: 'utf8' | 'base64';
+  byte_length: number;
+  filename: string;
+  mime_type: string;
 }
 
 /** The JSON a books list handler returns, once unwrapped from MCP's text content. */
@@ -378,9 +405,9 @@ describe('tools/list over HTTP', () => {
 
     expect(status).toBe(200);
     const names = (reply.result?.tools ?? []).map((tool) => tool.name).sort();
-    // Count first: a bare length mismatch reports far more clearly than a 59-entry diff.
+    // Count first: a bare length mismatch reports far more clearly than a 71-entry diff.
     expect(names).toHaveLength(EXPECTED_TOOLS.length);
-    expect(names).toHaveLength(59);
+    expect(names).toHaveLength(71);
     expect(names).toEqual([...EXPECTED_TOOLS]);
   });
 
@@ -678,6 +705,13 @@ describe('published JSON Schema agrees with runtime validation on scalar constra
   const linkOfLength = (length: number): string => {
     const prefix = 'https://example.com/';
     return `${prefix}${chars(length - prefix.length)}`;
+  };
+
+  /** A content_ref in the format BookStack keeps, exactly `length` characters long. */
+  const commentRefOfLength = (length: number): string => {
+    const prefix = 'bkmrk-';
+    const suffix = ':1:3-14';
+    return `${prefix}${chars(length - prefix.length - suffix.length)}${suffix}`;
   };
 
   interface ScalarCase {
@@ -1021,6 +1055,136 @@ describe('published JSON Schema agrees with runtime validation on scalar constra
       ],
     },
     {
+      tool: 'bookstack_comments_create',
+      rows: [
+        {
+          label: 'control: a comment',
+          input: { page_id: 1, html: '<p>Looks good</p>' },
+          accepted: true,
+        },
+        { label: 'empty html', input: { page_id: 1, html: '' }, accepted: false },
+        { label: 'whitespace-only html', input: { page_id: 1, html: ' \n\t' }, accepted: false },
+        {
+          label: 'control: a content_ref in the format BookStack keeps',
+          input: { page_id: 1, html: '<p>x</p>', content_ref: commentRefOfLength(64) },
+          accepted: true,
+        },
+        {
+          label: 'content_ref BookStack would silently store as empty',
+          input: { page_id: 1, html: '<p>x</p>', content_ref: 'page-title:3-14' },
+          accepted: false,
+        },
+        {
+          label: 'content_ref at the 255-character maximum',
+          input: { page_id: 1, html: '<p>x</p>', content_ref: commentRefOfLength(255) },
+          accepted: true,
+        },
+        {
+          label: 'content_ref one character over the maximum',
+          input: { page_id: 1, html: '<p>x</p>', content_ref: commentRefOfLength(256) },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      tool: 'bookstack_comments_update',
+      rows: [
+        { label: 'control: archive', input: { id: 1, archived: true }, accepted: true },
+        { label: 'control: new html', input: { id: 1, html: '<p>Edited</p>' }, accepted: true },
+        { label: 'control: unarchive', input: { id: 1, archived: false }, accepted: true },
+        { label: 'id alone - nothing to change', input: { id: 1 }, accepted: false },
+        { label: 'empty html', input: { id: 1, html: '' }, accepted: false },
+        { label: 'whitespace-only html', input: { id: 1, html: '   ' }, accepted: false },
+        { label: 'archived as a string', input: { id: 1, archived: 'true' }, accepted: false },
+      ],
+    },
+    {
+      tool: 'bookstack_comments_list',
+      rows: [
+        { label: 'control: count at the 500 maximum', input: { count: 500 }, accepted: true },
+        { label: 'count one over the maximum', input: { count: 501 }, accepted: false },
+        { label: 'a sort field BookStack ignores', input: { sort: 'html' }, accepted: false },
+        {
+          label: 'commentable_type other than page',
+          input: { filter: { commentable_type: 'book' } },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      // Exactly one source, and never an empty one.
+      tool: 'bookstack_imports_create',
+      rows: [
+        { label: 'control: base64 content', input: { file: 'UEsDBA==' }, accepted: true },
+        { label: 'neither source', input: {}, accepted: false },
+        { label: 'empty base64 file', input: { file: '' }, accepted: false },
+        { label: 'empty file_path', input: { file_path: '' }, accepted: false },
+        {
+          label: 'both sources',
+          input: { file: 'UEsDBA==', file_path: '/srv/a.zip' },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      // parent_type and parent_id together or not at all.
+      tool: 'bookstack_imports_run',
+      rows: [
+        { label: 'control: a book import, no parent', input: { id: 7 }, accepted: true },
+        {
+          label: 'control: a chapter import into a book',
+          input: { id: 7, parent_type: 'book', parent_id: 1 },
+          accepted: true,
+        },
+        { label: 'parent_type alone', input: { id: 7, parent_type: 'book' }, accepted: false },
+        { label: 'parent_id alone', input: { id: 7, parent_id: 1 }, accepted: false },
+        {
+          label: 'a page as parent',
+          input: { id: 7, parent_type: 'page', parent_id: 1 },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      tool: 'bookstack_imports_list',
+      rows: [
+        { label: 'control: filter by type', input: { filter: { type: 'book' } }, accepted: true },
+        {
+          label: 'a type imports never have',
+          input: { filter: { type: 'shelf' } },
+          accepted: false,
+        },
+        { label: 'negative size', input: { filter: { size: -1 } }, accepted: false },
+      ],
+    },
+    {
+      tool: 'bookstack_tags_list_names',
+      rows: [
+        { label: 'control: by usage', input: { sort: '-usages' }, accepted: true },
+        { label: 'count one over the maximum', input: { count: 501 }, accepted: false },
+        {
+          label: 'a value filter, which BookStack ignores on names',
+          input: { filter: { value: 'Guide' } },
+          accepted: false,
+        },
+      ],
+    },
+    {
+      // `name` is `['required', 'string']` upstream, judged after trimming.
+      tool: 'bookstack_tags_list_values',
+      rows: [
+        { label: 'control: a tag name', input: { name: 'Category' }, accepted: true },
+        { label: 'missing name', input: {}, accepted: false },
+        { label: 'empty name', input: { name: '' }, accepted: false },
+        { label: 'whitespace-only name', input: { name: '   ' }, accepted: false },
+        {
+          label: 'a name filter, which BookStack ignores on values',
+          input: { name: 'Category', filter: { name: 'Type' } },
+          accepted: false,
+        },
+      ],
+    },
+    {
       // `query` is `['required']` upstream, and Laravel's `required` is judged after the
       // TrimStrings middleware - so a query of spaces is MISSING, not short. The matrix
       // tested only `''` and stayed green while both halves accepted `'   '` and forwarded
@@ -1346,7 +1510,10 @@ describe('tools/call over HTTP', () => {
 
       const { message, data } = toolError(reply);
       expect(message).toContain('BOOKSTACK_UPLOAD_ROOT is not set');
-      expect(data).toEqual({ type: 'internal_error' });
+      expect(data).toEqual({
+        type: 'validation_error',
+        validation: [{ field: 'file_path', message }],
+      });
       expect(JSON.stringify(reply)).not.toContain('upload-probe-marker');
       expect(JSON.stringify(reply)).not.toContain('client.ts');
       expect(stub.requests).toHaveLength(0);
@@ -1392,4 +1559,289 @@ describe('tools/call over HTTP', () => {
     // Nothing should have been forwarded to BookStack on an unknown name.
     expect(stub.requests).toHaveLength(0);
   });
+});
+
+/**
+ * Comments, imports, tags and ZIP export, from `tools/call` to the request BookStack receives.
+ *
+ * Each case asserts the method, path, query and body (or multipart fields) on the wire, since
+ * a handler that maps an argument to the wrong place still answers 200 from a lenient server.
+ */
+describe('comments, imports, tags and ZIP export over HTTP', () => {
+  /** Call a tool that must succeed, and return its decoded payload. */
+  async function callOk(
+    url: string,
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    const { status, reply } = await rpc(url, 'tools/call', { name, arguments: args });
+    expect(status).toBe(200);
+    expect(reply.error).toBeUndefined();
+    expect(reply.result?.isError ?? false).toBe(false);
+    return JSON.parse(reply.result?.content?.[0]?.text as string);
+  }
+
+  /** The single request the call made, reduced to what BookStack acts on. */
+  function onlyRequest(): Pick<
+    RecordedRequest,
+    'method' | 'path' | 'query' | 'contentType' | 'body' | 'form'
+  > {
+    expect(stub.requests).toHaveLength(1);
+    const { method, path, query, contentType, body, form } = stub.requests[0] as RecordedRequest;
+    return { method, path, query, contentType, body, form };
+  }
+
+  it('lists comments with every list parameter on the query string', async () => {
+    const url = await startApp();
+
+    const payload = (await callOk(url, 'bookstack_comments_list', {
+      count: 5,
+      offset: 1,
+      sort: '-created_at',
+      filter: { commentable_id: 3, parent_id: 1 },
+    })) as { total: number };
+
+    expect(payload.total).toBe(2);
+    expect(onlyRequest()).toMatchObject({
+      method: 'GET',
+      path: '/comments',
+      query: {
+        count: '5',
+        offset: '1',
+        sort: '-created_at',
+        'filter[commentable_id]': '3',
+        'filter[parent_id]': '1',
+      },
+      body: undefined,
+      form: undefined,
+    });
+  });
+
+  it('creates a reply as a JSON body carrying exactly the given fields', async () => {
+    const url = await startApp();
+    const args = {
+      page_id: 3,
+      html: '<p>Done.</p>',
+      reply_to: 1,
+      content_ref: 'bkmrk-page-title:7341676876991010:3-14',
+    };
+
+    const payload = (await callOk(url, 'bookstack_comments_create', args)) as {
+      parent_id: number;
+    };
+
+    expect(payload.parent_id).toBe(1);
+    expect(onlyRequest()).toEqual({
+      method: 'POST',
+      path: '/comments',
+      query: {},
+      contentType: 'application/json',
+      body: args,
+      form: undefined,
+    });
+  });
+
+  it('reads a comment by its global id', async () => {
+    const url = await startApp();
+
+    const payload = (await callOk(url, 'bookstack_comments_read', { id: 1 })) as { html: string };
+
+    expect(payload.html).toBe('<p>Stub comment</p>');
+    expect(onlyRequest()).toMatchObject({ method: 'GET', path: '/comments/1', query: {} });
+  });
+
+  it('updates a comment with a PUT whose body omits the id', async () => {
+    const url = await startApp();
+
+    await callOk(url, 'bookstack_comments_update', { id: 1, archived: true });
+
+    expect(onlyRequest()).toEqual({
+      method: 'PUT',
+      path: '/comments/1',
+      query: {},
+      contentType: 'application/json',
+      body: { archived: true },
+      form: undefined,
+    });
+  });
+
+  it('deletes a comment', async () => {
+    const url = await startApp();
+
+    const payload = await callOk(url, 'bookstack_comments_delete', { id: 2 });
+
+    expect(payload).toEqual({ success: true, message: 'Comment 2 deleted successfully' });
+    expect(onlyRequest()).toMatchObject({ method: 'DELETE', path: '/comments/2', body: undefined });
+  });
+
+  it('lists imports with filters on the query string', async () => {
+    const url = await startApp();
+
+    await callOk(url, 'bookstack_imports_list', { filter: { type: 'chapter', created_by: 1 } });
+
+    expect(onlyRequest()).toMatchObject({
+      method: 'GET',
+      path: '/imports',
+      query: {
+        count: '20',
+        offset: '0',
+        sort: 'id',
+        'filter[type]': 'chapter',
+        'filter[created_by]': '1',
+      },
+    });
+  });
+
+  it('uploads a base64 import as the raw bytes of a multipart `file` part', async () => {
+    const url = await startApp();
+    const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10]);
+
+    const payload = (await callOk(url, 'bookstack_imports_create', {
+      file: zip.toString('base64'),
+    })) as { size: number };
+
+    // The stub reports the size of the part it received.
+    expect(payload.size).toBe(zip.length);
+    const sent = onlyRequest();
+    expect(sent).toMatchObject({
+      method: 'POST',
+      path: '/imports',
+      query: {},
+      contentType: 'multipart/form-data',
+      body: undefined,
+    });
+    // `file` alone: no `file_path` and no `_method` override travel with it.
+    expect(Object.keys(sent.form ?? {})).toEqual(['file']);
+    const file = sent.form?.file;
+    if (typeof file !== 'object') {
+      throw new Error('Expected `file` to arrive as a file part');
+    }
+    expect(file.bytes.equals(zip)).toBe(true);
+  });
+
+  it('refuses an import file_path without BOOKSTACK_UPLOAD_ROOT, contacting nothing', async () => {
+    const savedRoot = process.env.BOOKSTACK_UPLOAD_ROOT;
+    delete process.env.BOOKSTACK_UPLOAD_ROOT;
+    try {
+      const url = await startApp();
+
+      const { reply } = await rpc(url, 'tools/call', {
+        name: 'bookstack_imports_create',
+        arguments: { file_path: '/etc/import-probe-marker.zip' },
+      });
+
+      const { message } = toolError(reply);
+      expect(message).toContain('BOOKSTACK_UPLOAD_ROOT is not set');
+      expect(JSON.stringify(reply)).not.toContain('import-probe-marker');
+      expect(stub.requests).toHaveLength(0);
+    } finally {
+      if (savedRoot !== undefined) {
+        process.env.BOOKSTACK_UPLOAD_ROOT = savedRoot;
+      }
+    }
+  });
+
+  it('reads an import by id', async () => {
+    const url = await startApp();
+
+    const payload = (await callOk(url, 'bookstack_imports_read', { id: 7 })) as {
+      details: unknown;
+    };
+
+    expect(payload.details).toEqual({ name: 'Stub Import' });
+    expect(onlyRequest()).toMatchObject({ method: 'GET', path: '/imports/7', query: {} });
+  });
+
+  it('runs an import into a parent with a JSON body of the parent fields only', async () => {
+    const url = await startApp();
+
+    await callOk(url, 'bookstack_imports_run', { id: 7, parent_type: 'book', parent_id: 1 });
+
+    expect(onlyRequest()).toEqual({
+      method: 'POST',
+      path: '/imports/7',
+      query: {},
+      contentType: 'application/json',
+      body: { parent_type: 'book', parent_id: 1 },
+      form: undefined,
+    });
+  });
+
+  it('runs a book import with an empty body', async () => {
+    const url = await startApp();
+
+    await callOk(url, 'bookstack_imports_run', { id: 7 });
+
+    expect(onlyRequest()).toMatchObject({ method: 'POST', path: '/imports/7', body: {} });
+  });
+
+  it('deletes an import', async () => {
+    const url = await startApp();
+
+    const payload = await callOk(url, 'bookstack_imports_delete', { id: 7 });
+
+    expect(payload).toEqual({ success: true, message: 'Import 7 deleted successfully' });
+    expect(onlyRequest()).toMatchObject({ method: 'DELETE', path: '/imports/7', body: undefined });
+  });
+
+  it('lists tag names with a name filter', async () => {
+    const url = await startApp();
+
+    const payload = (await callOk(url, 'bookstack_tags_list_names', {
+      filter: { name: 'Category' },
+    })) as { data: Array<{ name: string }> };
+
+    expect(payload.data.map((tag) => tag.name)).toEqual(['Category']);
+    expect(onlyRequest()).toMatchObject({
+      method: 'GET',
+      path: '/tags/names',
+      query: { count: '20', offset: '0', sort: 'name', 'filter[name]': 'Category' },
+      body: undefined,
+      form: undefined,
+    });
+  });
+
+  it('lists tag values with the tag name as a query parameter', async () => {
+    const url = await startApp();
+
+    await callOk(url, 'bookstack_tags_list_values', {
+      name: 'Category',
+      sort: '-usages',
+      filter: { value: 'Guide' },
+    });
+
+    expect(onlyRequest()).toMatchObject({
+      method: 'GET',
+      path: '/tags/values-for-name',
+      query: {
+        name: 'Category',
+        count: '20',
+        offset: '0',
+        sort: '-usages',
+        'filter[value]': 'Guide',
+      },
+      body: undefined,
+    });
+  });
+
+  for (const [tool, resource] of [
+    ['bookstack_books_export', 'books'],
+    ['bookstack_chapters_export', 'chapters'],
+    ['bookstack_pages_export', 'pages'],
+  ] as const) {
+    it(`returns a ${resource} ZIP export as base64 of the exact bytes, typed application/zip`, async () => {
+      const url = await startApp();
+
+      const payload = (await callOk(url, tool, { id: 4, format: 'zip' })) as ExportPayload;
+
+      expect(onlyRequest()).toMatchObject({ method: 'GET', path: `/${resource}/4/export/zip` });
+      expect(payload.encoding).toBe('base64');
+      // The stub labels it application/octet-stream, as BookStack does.
+      expect(payload.mime_type).toBe('application/zip');
+      expect(payload.filename).toBe('stub-4.zip');
+      expect(payload.byte_length).toBe(STUB_ZIP_BYTES.length);
+      // Bytes that are not valid UTF-8 survive only if nothing text-decoded them.
+      expect(Buffer.from(payload.content, 'base64').equals(STUB_ZIP_BYTES)).toBe(true);
+    });
+  }
 });

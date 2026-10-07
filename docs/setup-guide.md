@@ -20,7 +20,7 @@
 The BookStack MCP Server provides comprehensive access to BookStack's knowledge management capabilities through the Model Context Protocol (MCP). This guide covers everything you need to set up and configure the server for optimal performance.
 
 ### Key Features
-- **59 MCP Tools** across 13 categories, covering the supported subset of the BookStack API
+- **71 MCP Tools** across 16 categories, covering the supported subset of the BookStack API
 - **5 Resources and 6 Resource Templates** for dynamic content retrieval
 - **Rate Limiting** with configurable limits
 - **Comprehensive Validation** using Zod schemas
@@ -54,6 +54,10 @@ free -h         # Linux/macOS
 ### BookStack Version
 - **Recommended**: Latest stable version of BookStack
 - **API Version**: v1 (current)
+- **Minimum versions for newer tools**:
+  - Tags (`bookstack_tags_*`): BookStack v26.05+
+  - Comments (`bookstack_comments_*`): BookStack v25.11+
+  - Imports (`bookstack_imports_*`) and the `zip` export format: BookStack v25.07+
 
 > ⚠️ **Note**: This server uses modern BookStack API features including the system endpoint for health checks. Please ensure you're running a recent version of BookStack.
 
@@ -679,7 +683,7 @@ curl -i http://localhost:3000/health
   "status": "healthy",
   "checks": [
     {"name": "bookstack_connection", "healthy": true, "message": "BookStack API connection"},
-    {"name": "tools_loaded", "healthy": true, "message": "59 tools loaded"},
+    {"name": "tools_loaded", "healthy": true, "message": "71 tools loaded"},
     {"name": "resources_loaded", "healthy": true, "message": "5 resources and 6 resource templates loaded"}
   ]
 }

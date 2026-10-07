@@ -44,12 +44,12 @@ import { PageTools } from '../../src/tools/pages';
 import type {
   Book,
   Chapter,
-  ExportFormat,
   ExportResult,
   ListResponse,
   MCPTool,
   Page,
   PageWithContent,
+  TextExportFormat,
 } from '../../src/types';
 import { ErrorHandler } from '../../src/utils/errors';
 import { Logger } from '../../src/utils/logger';
@@ -154,9 +154,6 @@ async function callTool<T>(provider: ToolProvider, name: string, params: unknown
 function uniqueName(label: string): string {
   return `itest-pages-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
-
-/** Every export format whose payload is text rather than binary. */
-type TextExportFormat = Exclude<ExportFormat, 'pdf'>;
 
 /**
  * What the client must report per text format. BookStack labels every export
@@ -781,6 +778,31 @@ describe.skipIf(!runIntegration)('bookstack_pages_* tools (live BookStack)', () 
       });
 
       expectPdfExport(pdf, page.slug);
+    }, 120_000);
+
+    it('exports a page as a base64-encoded zip', async () => {
+      const page = track(
+        'page',
+        await callTool<PageWithContent>(pageTools, 'bookstack_pages_create', {
+          chapter_id: parentChapter.id,
+          name: uniqueName('export-zip'),
+          markdown: '# Zip\n\nBody.',
+        })
+      );
+
+      const zip = await callTool<ExportResult>(pageTools, 'bookstack_pages_export', {
+        id: page.id,
+        format: 'zip',
+      });
+
+      expect(zip.encoding).toBe('base64');
+      expect(zip.mime_type).toBe('application/zip');
+      expect(zip.filename).toBe(`${page.slug}.zip`);
+      const decoded = Buffer.from(zip.content, 'base64');
+      expect(decoded.byteLength).toBe(zip.byte_length);
+      // A zip archive opens with the local file header signature "PK\x03\x04".
+      expect(decoded.subarray(0, 2).toString('latin1')).toBe('PK');
+      expect(decoded.subarray(0, 4).toString('hex')).toBe('504b0304');
     }, 120_000);
 
     it('reports a missing page on export', async () => {
