@@ -203,6 +203,14 @@ function sanitizeWait(waitMs: number | undefined): number | undefined {
   return Math.min(waitMs, MAX_SERVER_DIRECTED_WAIT_MS);
 }
 
+/** The upload guard refused a `file_path`; the caller's input, and its message names no path. */
+export class UploadRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UploadRefusedError';
+  }
+}
+
 /**
  * Error handler for BookStack MCP Server
  */
@@ -299,6 +307,13 @@ export class ErrorHandler {
       return new McpError(ErrorCode.InvalidRequest, error.message, {
         type: 'concurrent_modification',
         ...error.details,
+      });
+    }
+
+    if (error instanceof UploadRefusedError) {
+      return new McpError(ErrorCode.InvalidParams, error.message, {
+        type: 'validation_error',
+        validation: [{ field: 'file_path', message: error.message }],
       });
     }
 

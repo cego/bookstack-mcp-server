@@ -38,11 +38,11 @@ import type {
   Book,
   Chapter,
   ChapterWithPages,
-  ExportFormat,
   ExportResult,
   ListResponse,
   MCPTool,
   Page,
+  TextExportFormat,
   UserRef,
 } from '../../src/types';
 import { ErrorHandler } from '../../src/utils/errors';
@@ -162,9 +162,6 @@ function uniqueName(label: string): string {
 function userRefId(ref: UserRef): number {
   return typeof ref === 'number' ? ref : ref.id;
 }
-
-/** Every export format whose payload is text rather than binary. */
-type TextExportFormat = Exclude<ExportFormat, 'pdf'>;
 
 /**
  * What the client must report per text format. BookStack labels every export

@@ -16,7 +16,9 @@ import { AttachmentTools } from '../../src/tools/attachments';
 import { AuditTools } from '../../src/tools/audit';
 import { BookTools } from '../../src/tools/books';
 import { ChapterTools } from '../../src/tools/chapters';
+import { CommentTools } from '../../src/tools/comments';
 import { ImageTools } from '../../src/tools/images';
+import { ImportTools } from '../../src/tools/imports';
 import { PageTools } from '../../src/tools/pages';
 import { PermissionTools } from '../../src/tools/permissions';
 import { RecycleBinTools } from '../../src/tools/recyclebin';
@@ -25,6 +27,7 @@ import { SearchTools } from '../../src/tools/search';
 import { ServerInfoTools } from '../../src/tools/server-info';
 import { ShelfTools } from '../../src/tools/shelves';
 import { SystemTools } from '../../src/tools/system';
+import { TagTools } from '../../src/tools/tags';
 import { UserTools } from '../../src/tools/users';
 import type { MCPResource, MCPTool } from '../../src/types';
 import type { Logger } from '../../src/utils/logger';
@@ -96,6 +99,9 @@ export function buildTools(client: BookStackClient): Map<string, MCPTool> {
     new RoleTools(client, validator, silentLogger),
     new AttachmentTools(client, validator, silentLogger),
     new ImageTools(client, validator, silentLogger),
+    new CommentTools(client, validator, silentLogger),
+    new ImportTools(client, validator, silentLogger),
+    new TagTools(client, validator, silentLogger),
     new SearchTools(client, validator, silentLogger),
     new RecycleBinTools(client, validator, silentLogger),
     new PermissionTools(client, validator, silentLogger),

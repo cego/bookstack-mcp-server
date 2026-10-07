@@ -118,6 +118,21 @@ const RULES: Record<string, IntegerRule> = {
   'bookstack_chapters_update.id': 'entity-id',
   'bookstack_chapters_update.priority': 'unbounded',
 
+  // --- Comments ---
+  // `parent_id`, `local_id` and `reply_to` are page-scoped numbers that BookStack starts at 1.
+  'bookstack_comments_create.page_id': 'entity-id',
+  'bookstack_comments_create.reply_to': 'entity-id',
+  'bookstack_comments_delete.id': 'entity-id',
+  'bookstack_comments_list.count': 'positive-count',
+  'bookstack_comments_list.filter.commentable_id': 'entity-id',
+  'bookstack_comments_list.filter.created_by': 'entity-id',
+  'bookstack_comments_list.filter.local_id': 'entity-id',
+  'bookstack_comments_list.filter.parent_id': 'entity-id',
+  'bookstack_comments_list.filter.updated_by': 'entity-id',
+  'bookstack_comments_list.offset': 'non-negative',
+  'bookstack_comments_read.id': 'entity-id',
+  'bookstack_comments_update.id': 'entity-id',
+
   // --- Images ---
   'bookstack_images_create.uploaded_to': 'entity-id',
   'bookstack_images_delete.id': 'entity-id',
@@ -126,6 +141,16 @@ const RULES: Record<string, IntegerRule> = {
   'bookstack_images_list.offset': 'non-negative',
   'bookstack_images_read.id': 'entity-id',
   'bookstack_images_update.id': 'entity-id',
+
+  // --- Imports ---
+  'bookstack_imports_delete.id': 'entity-id',
+  'bookstack_imports_list.count': 'positive-count',
+  'bookstack_imports_list.filter.created_by': 'entity-id',
+  'bookstack_imports_list.filter.size': 'non-negative',
+  'bookstack_imports_list.offset': 'non-negative',
+  'bookstack_imports_read.id': 'entity-id',
+  'bookstack_imports_run.id': 'entity-id',
+  'bookstack_imports_run.parent_id': 'entity-id',
 
   // --- Pages ---
   'bookstack_pages_append.id': 'entity-id',
@@ -189,6 +214,12 @@ const RULES: Record<string, IntegerRule> = {
   'bookstack_shelves_update.books[]': 'entity-id',
   'bookstack_shelves_update.id': 'entity-id',
 
+  // --- Tags ---
+  'bookstack_tags_list_names.count': 'positive-count',
+  'bookstack_tags_list_names.offset': 'non-negative',
+  'bookstack_tags_list_values.count': 'positive-count',
+  'bookstack_tags_list_values.offset': 'non-negative',
+
   // --- Users ---
   'bookstack_users_create.roles[]': 'entity-id',
   'bookstack_users_delete.id': 'entity-id',
@@ -231,11 +262,24 @@ const TOOL_BASES: Record<string, Record<string, unknown>> = {
   bookstack_chapters_list: { count: 20, offset: 0, filter: { book_id: 1, created_by: 1 } },
   bookstack_chapters_read: { id: 1 },
   bookstack_chapters_update: { id: 1, book_id: 1, priority: 1, default_template_id: 1 },
+  bookstack_comments_create: { page_id: 1, html: '<p>x</p>', reply_to: 1 },
+  bookstack_comments_delete: { id: 1 },
+  bookstack_comments_list: {
+    count: 20,
+    offset: 0,
+    filter: { commentable_id: 1, parent_id: 1, local_id: 1, created_by: 1, updated_by: 1 },
+  },
+  bookstack_comments_read: { id: 1 },
+  bookstack_comments_update: { id: 1, archived: true },
   bookstack_images_create: { uploaded_to: 1, name: 'Probe', image: 'aGk=', type: 'gallery' },
   bookstack_images_delete: { id: 1 },
   bookstack_images_list: { count: 20, offset: 0, filter: { uploaded_to: 1 } },
   bookstack_images_read: { id: 1 },
   bookstack_images_update: { id: 1, name: 'Probe' },
+  bookstack_imports_delete: { id: 1 },
+  bookstack_imports_list: { count: 20, offset: 0, filter: { size: 1, created_by: 1 } },
+  bookstack_imports_read: { id: 1 },
+  bookstack_imports_run: { id: 1, parent_type: 'book', parent_id: 1 },
   // The partial-edit tools reach the client on their FIRST call, `getPage`, before they can
   // apply anything - which is what this harness measures. So a base only has to be
   // well-formed enough to get past validation; the recording client answers `{}` and the edit
@@ -279,6 +323,8 @@ const TOOL_BASES: Record<string, Record<string, unknown>> = {
   bookstack_shelves_list: { count: 20, offset: 0, filter: { created_by: 1 } },
   bookstack_shelves_read: { id: 1 },
   bookstack_shelves_update: { id: 1, books: [1] },
+  bookstack_tags_list_names: { count: 20, offset: 0 },
+  bookstack_tags_list_values: { name: 'Probe', count: 20, offset: 0 },
   bookstack_users_create: { name: 'Probe', email: 'probe@example.com', roles: [1] },
   // A DIFFERENT heir from `id`: equal ids are refused outright, so a base naming itself would
   // be rejected for that reason rather than for the value under probe.

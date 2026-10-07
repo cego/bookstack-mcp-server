@@ -14,6 +14,9 @@
    - [Roles](#roles-api)
    - [Attachments](#attachments-api)
    - [Images](#images-api)
+   - [Comments](#comments-api)
+   - [Imports](#imports-api)
+   - [Tags](#tags-api)
    - [Search](#search-api)
    - [Recycle Bin](#recycle-bin-api)
    - [Permissions](#permissions-api)
@@ -29,13 +32,13 @@ The BookStack MCP Server provides comprehensive access to the BookStack knowledg
 
 ### Key Features
 
-- **API Coverage**: 59 tools, 5 resources and 6 resource templates across 13 categories, covering the supported subset of the BookStack API (comments, imports, tag listings, image-gallery `data` endpoints and ZIP export are not exposed)
+- **API Coverage**: 71 tools, 5 resources and 6 resource templates across 16 categories, covering the supported subset of the BookStack API (the image-gallery `data` endpoints are not exposed)
 - **Type Safety**: Full TypeScript interfaces for all operations
 - **Robust Error Handling**: Comprehensive error mapping and recovery guidance
 - **Rate Limiting**: Token bucket algorithm with configurable limits
 - **Validation**: Zod-based parameter validation, strict by default (`VALIDATION_STRICT_MODE=true`)
 - **Retry Logic**: Automatic retry with exponential backoff
-- **Export Capabilities**: Multi-format export (HTML, PDF, Markdown, Plain Text)
+- **Export Capabilities**: Multi-format export (HTML, PDF, Markdown, Plain Text, ZIP)
 
 ### Architecture
 
@@ -275,13 +278,15 @@ interface BookWithContents extends Book {
 // Tool: bookstack_books_export
 interface ExportParams {
   id: number;
-  format: 'html' | 'pdf' | 'plaintext' | 'markdown';
+  format: 'html' | 'pdf' | 'plaintext' | 'markdown' | 'zip';
 }
 
 interface ExportResult {
-  content: string;    // Base64 encoded for binary formats
-  filename: string;   // Suggested filename
-  mime_type: string;  // MIME type for the content
+  content: string;               // The text, or base64 of the bytes for pdf and zip
+  encoding: 'utf8' | 'base64';   // base64 for pdf and zip
+  byte_length: number;           // Size of the exported file in bytes
+  filename: string;              // Suggested filename
+  mime_type: string;             // e.g. application/zip for zip
 }
 ```
 
@@ -777,6 +782,135 @@ interface UpdateImageParams {
 ```typescript
 // Tool: bookstack_images_delete
 // Permanently deletes image
+```
+
+### Comments API
+
+Comments on pages. `local_id` numbers a comment within its page, and `parent_id` and
+`reply_to` refer to that page-scoped number rather than the global `id`.
+
+#### List Comments
+```typescript
+// Tool: bookstack_comments_list
+// Entries carry neither html nor archived; read a comment for those
+interface CommentsListParams extends PaginationParams {
+  filter?: {
+    commentable_id?: number;   // Page ID
+    commentable_type?: 'page';
+    parent_id?: number;        // local_id of the parent comment
+    local_id?: number;
+    content_ref?: string;
+    created_by?: number;
+    updated_by?: number;
+  };
+}
+```
+
+#### Create Comment
+```typescript
+// Tool: bookstack_comments_create
+// Needs the comment-create-all permission
+interface CreateCommentParams {
+  page_id: number;        // Required
+  html: string;           // Required, not blank
+  reply_to?: number;      // local_id of the comment to reply to
+  content_ref?: string;   // 'bkmrk-<element id>:<hash>:<start>-<end>', max 255 chars
+}
+```
+
+#### Read Comment
+```typescript
+// Tool: bookstack_comments_read
+// Returns the comment with html, archived and its direct replies
+```
+
+#### Update Comment
+```typescript
+// Tool: bookstack_comments_update
+interface UpdateCommentParams {
+  id: number;
+  html?: string;        // Replaces the content
+  archived?: boolean;   // Top-level comments only
+}
+```
+
+#### Delete Comment
+```typescript
+// Tool: bookstack_comments_delete
+// Permanently deletes the comment
+```
+
+### Imports API
+
+Imports of BookStack's portable ZIP format. All import tools need the `content-import`
+permission.
+
+#### List Imports
+```typescript
+// Tool: bookstack_imports_list
+interface ImportsListParams extends PaginationParams {
+  filter?: {
+    name?: string;
+    size?: number;                         // Bytes
+    type?: 'book' | 'chapter' | 'page';
+    created_by?: number;
+  };
+}
+```
+
+#### Create Import
+```typescript
+// Tool: bookstack_imports_create
+// Uploads and validates the ZIP as multipart; nothing is created until it is run
+type CreateImportParams =
+  | { file: string }        // Base64 encoded ZIP
+  | { file_path: string };  // Server-local path inside BOOKSTACK_UPLOAD_ROOT
+```
+
+#### Read Import
+```typescript
+// Tool: bookstack_imports_read
+// Returns the pending import with `details` describing its content
+```
+
+#### Run Import
+```typescript
+// Tool: bookstack_imports_run
+// Returns the created book, chapter or page, and deletes the import
+interface RunImportParams {
+  id: number;
+  parent_type?: 'book' | 'chapter';  // Required with parent_id for chapter and page imports
+  parent_id?: number;
+}
+```
+
+#### Delete Import
+```typescript
+// Tool: bookstack_imports_delete
+// Permanently deletes a pending import without running it
+```
+
+### Tags API
+
+Read-only listings of the tags on content visible to the authenticated user.
+
+#### List Tag Names
+```typescript
+// Tool: bookstack_tags_list_names
+interface TagNamesListParams extends PaginationParams {
+  filter?: { name?: string };
+}
+// Entries: { name, values, usages, page_count, chapter_count, book_count, shelf_count }
+```
+
+#### List Tag Values
+```typescript
+// Tool: bookstack_tags_list_values
+interface TagValuesListParams extends PaginationParams {
+  name: string;                    // Required tag name
+  filter?: { value?: string };
+}
+// Entries: { name, value, usages, page_count, chapter_count, book_count, shelf_count }
 ```
 
 ### Search API

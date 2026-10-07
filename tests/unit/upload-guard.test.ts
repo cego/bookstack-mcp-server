@@ -8,10 +8,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readGuardedUploadFile } from '../../src/api/client';
+import { UPLOAD_MAX_BYTES } from '../../src/types';
+import { UploadRefusedError } from '../../src/utils/errors';
 
 const GUARD_ENV = ['MCP_TRANSPORT', 'BOOKSTACK_UPLOAD_ROOT'] as const;
 const savedEnv = new Map<string, string | undefined>();
@@ -20,6 +22,10 @@ let base: string;
 let uploadRoot: string;
 let outside: string;
 let inside: string;
+let subdir: string;
+let fifo: string | undefined;
+let oversize: string;
+let atLimit: string;
 
 function setGuardEnv(transport: string, root: string | undefined): void {
   process.env.MCP_TRANSPORT = transport;
@@ -52,6 +58,17 @@ beforeAll(async () => {
   outside = join(base, 'outside-secret.txt');
   await writeFile(outside, 'outside the root');
   await symlink(outside, join(uploadRoot, 'link-out.txt'));
+  subdir = join(uploadRoot, 'subdir');
+  await mkdir(subdir);
+  // Sparse files: the size is real to stat() without writing 50 MB to disk.
+  oversize = join(uploadRoot, 'oversize.bin');
+  await writeFile(oversize, '');
+  await truncate(oversize, UPLOAD_MAX_BYTES + 1);
+  atLimit = join(uploadRoot, 'at-limit.bin');
+  await writeFile(atLimit, '');
+  await truncate(atLimit, UPLOAD_MAX_BYTES);
+  const made = Bun.spawnSync(['mkfifo', join(uploadRoot, 'pipe')]);
+  fifo = made.exitCode === 0 ? join(uploadRoot, 'pipe') : undefined;
 });
 
 afterEach(() => {
@@ -96,17 +113,46 @@ describe('file_path upload guard', () => {
         join(uploadRoot, 'missing.txt'),
         outside,
         uploadRoot,
+        subdir,
+        oversize,
+        ...(fifo ? [fifo] : []),
       ]) {
-        const { message } = await refusal(candidate);
+        const error = await refusal(candidate);
         // Neither the resolved path nor the root: a refusal is not a map of the server.
-        expect(message).not.toContain(base);
-        messages.add(message);
+        expect(error.message).not.toContain(base);
+        expect(error).toBeInstanceOf(UploadRefusedError);
+        messages.add(error.message);
       }
 
       // Identical wording, so a refusal cannot reveal whether a path outside the root exists.
       expect(messages.size).toBe(1);
     });
   }
+
+  it('refuses a directory, a FIFO and a file over 50000 KB inside the root', async () => {
+    setGuardEnv('stdio', uploadRoot);
+
+    // A FIFO would block readFile() forever; it must be refused, not read.
+    for (const candidate of [subdir, oversize, ...(fifo ? [fifo] : [])]) {
+      const error = await refusal(candidate);
+      expect(error).toBeInstanceOf(UploadRefusedError);
+    }
+    expect(fifo).toBeDefined();
+  });
+
+  it('reads a file of exactly 50000 KB', async () => {
+    setGuardEnv('stdio', uploadRoot);
+
+    expect((await readGuardedUploadFile(atLimit)).byteLength).toBe(UPLOAD_MAX_BYTES);
+  });
+
+  it('refuses with UploadRefusedError when the root is unset or unusable', async () => {
+    setGuardEnv('http', undefined);
+    expect(await refusal(inside)).toBeInstanceOf(UploadRefusedError);
+
+    setGuardEnv('http', join(base, 'no-such-root'));
+    expect(await refusal(inside)).toBeInstanceOf(UploadRefusedError);
+  });
 
   it('does not name a BOOKSTACK_UPLOAD_ROOT that cannot be resolved', async () => {
     const missingRoot = join(base, 'no-such-root');

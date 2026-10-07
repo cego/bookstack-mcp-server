@@ -626,7 +626,9 @@ describe.skipIf(!runIntegration)('BookStack attachment tools (live)', () => {
             name,
             file_path: traversal,
           })
-        ).rejects.toThrow(/must name a readable file inside BOOKSTACK_UPLOAD_ROOT/);
+        ).rejects.toThrow(
+          /must name a readable regular file of at most 50000 KB inside BOOKSTACK_UPLOAD_ROOT/
+        );
 
         const listed = (await runTool('bookstack_attachments_list', {
           filter: { uploaded_to: pageId, name },

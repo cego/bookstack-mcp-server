@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { readFile, realpath } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { open, realpath } from 'node:fs/promises';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { basename, extname, sep } from 'node:path';
@@ -16,6 +17,7 @@ import type {
   AttachmentsListParams,
   AuditLogEntry,
   AuditLogListParams,
+  BinaryExportFormat,
   Book,
   BookStackAPIClient,
   Bookshelf,
@@ -25,12 +27,17 @@ import type {
   Chapter,
   ChaptersListParams,
   ChapterWithPages,
+  Comment,
+  CommentDetail,
+  CommentsListParams,
   ContentPermissions,
   ContentType,
   CreateAttachmentParams,
   CreateBookParams,
   CreateChapterParams,
+  CreateCommentParams,
   CreateImageParams,
+  CreateImportParams,
   CreatePageParams,
   CreateRoleParams,
   CreateShelfParams,
@@ -40,6 +47,11 @@ import type {
   Image,
   ImageDetail,
   ImageGalleryListParams,
+  Import,
+  ImportCreateResult,
+  ImportDetail,
+  ImportRunResult,
+  ImportsListParams,
   ListResponse,
   Page,
   PagesListParams,
@@ -52,13 +64,19 @@ import type {
   RoleListItem,
   RolesListParams,
   RoleWithPermissions,
+  RunImportParams,
   SearchParams,
   SearchResult,
   ShelvesListParams,
   SystemInfo,
+  TagNameSummary,
+  TagNamesListParams,
+  TagValueSummary,
+  TagValuesListParams,
   UpdateAttachmentParams,
   UpdateBookParams,
   UpdateChapterParams,
+  UpdateCommentParams,
   UpdateContentPermissionsParams,
   UpdateImageParams,
   UpdatePageParams,
@@ -69,7 +87,8 @@ import type {
   UsersListParams,
   UserWithRoles,
 } from '../types';
-import type { ErrorHandler } from '../utils/errors';
+import { UPLOAD_MAX_BYTES } from '../types';
+import { type ErrorHandler, UploadRefusedError } from '../utils/errors';
 import type { Logger } from '../utils/logger';
 import {
   canonicalBaseUrl,
@@ -115,7 +134,10 @@ const RETRY_JITTER_RATIO = 0.25;
 const REPLAY_SAFE_METHODS: readonly string[] = ['GET', 'HEAD', 'OPTIONS'];
 
 /** Export formats whose bytes are binary and must not survive as a decoded string. */
-const BINARY_EXPORT_FORMATS: readonly ExportFormat[] = ['pdf'];
+const BINARY_EXPORT_FORMATS: readonly ExportFormat[] = [
+  'pdf',
+  'zip',
+] satisfies readonly BinaryExportFormat[];
 
 /**
  * Content types BookStack labels its exports with.
@@ -130,6 +152,7 @@ const EXPORT_MIME_TYPES: Record<ExportFormat, string> = {
   pdf: 'application/pdf',
   plaintext: 'text/plain',
   markdown: 'text/markdown',
+  zip: 'application/zip',
 };
 
 /** Extension used when the response carries no usable filename. */
@@ -138,6 +161,7 @@ const EXPORT_EXTENSIONS: Record<ExportFormat, string> = {
   pdf: 'pdf',
   plaintext: 'txt',
   markdown: 'md',
+  zip: 'zip',
 };
 
 /** Generic content types that carry no information and should not be reported as-is. */
@@ -338,10 +362,14 @@ export const UPLOAD_ROOT_UNUSABLE_MESSAGE =
   "'file_path' is unavailable because BOOKSTACK_UPLOAD_ROOT is not a readable directory on " +
   'this server. Send the file content inline as base64 instead.';
 
-/** One refusal for missing, unreadable and out-of-root paths alike, so it reveals nothing. */
+/** One refusal for missing, unreadable, oversized, non-regular and out-of-root paths alike. */
 export const UPLOAD_PATH_REFUSED_MESSAGE =
-  "'file_path' must name a readable file inside BOOKSTACK_UPLOAD_ROOT. Send the file content " +
-  'inline as base64 instead.';
+  "'file_path' must name a readable regular file of at most 50000 KB inside " +
+  'BOOKSTACK_UPLOAD_ROOT. Send the file content inline as base64 instead.';
+
+/** O_NONBLOCK so a FIFO cannot stall the open; O_NOFOLLOW so the vetted path cannot become a link. */
+const UPLOAD_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
 
 /**
  * SECURITY GUARD for the `file_path` upload parameter.
@@ -355,20 +383,22 @@ export const UPLOAD_PATH_REFUSED_MESSAGE =
  * in with `BOOKSTACK_UPLOAD_ROOT`. The candidate is then resolved with realpath() - which also
  * expands symlinks - and must be contained within the likewise-resolved root. This rejects
  * `../` traversal and symlink escapes, since containment is checked after resolution.
+ * The opened handle must then be a regular file of at most 50000 KB, so a directory, a FIFO
+ * or a device is refused rather than read.
  *
- * Refusal is always explicit, and never names a resolved path or the root.
+ * Refusal is always an explicit UploadRefusedError, and never names a resolved path or the root.
  */
 export async function readGuardedUploadFile(filePath: string): Promise<Buffer> {
   const uploadRoot = process.env.BOOKSTACK_UPLOAD_ROOT;
   if (!uploadRoot) {
-    throw new Error(UPLOAD_ROOT_UNSET_MESSAGE);
+    throw new UploadRefusedError(UPLOAD_ROOT_UNSET_MESSAGE);
   }
 
   let realRoot: string;
   try {
     realRoot = await realpath(uploadRoot);
   } catch {
-    throw new Error(UPLOAD_ROOT_UNUSABLE_MESSAGE);
+    throw new UploadRefusedError(UPLOAD_ROOT_UNUSABLE_MESSAGE);
   }
 
   try {
@@ -376,9 +406,23 @@ export async function readGuardedUploadFile(filePath: string): Promise<Buffer> {
     if (!isContainedIn(realTarget, realRoot)) {
       throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
     }
-    return await readFile(realTarget);
+    // Stat the open handle, not the path, so the file checked is the file read.
+    const handle = await open(realTarget, UPLOAD_OPEN_FLAGS);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > UPLOAD_MAX_BYTES) {
+        throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
+      }
+      const bytes = await handle.readFile();
+      if (bytes.byteLength > UPLOAD_MAX_BYTES) {
+        throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
+      }
+      return bytes;
+    } finally {
+      await handle.close();
+    }
   } catch {
-    throw new Error(UPLOAD_PATH_REFUSED_MESSAGE);
+    throw new UploadRefusedError(UPLOAD_PATH_REFUSED_MESSAGE);
   }
 }
 
@@ -776,8 +820,8 @@ export class BookStackClient implements BookStackAPIClient {
   /**
    * Upload via multipart/form-data.
    *
-   * BookStack's image-gallery and attachment endpoints take the payload as a file part
-   * and reject a JSON body, so these four routes bypass the JSON `request()` path.
+   * BookStack's image-gallery, attachment and import endpoints take the payload as a file
+   * part and reject a JSON body, so these routes bypass the JSON `request()` path.
    *
    * Two details make this work:
    *
@@ -857,7 +901,7 @@ export class BookStackClient implements BookStackAPIClient {
 
     const inline = fields[fileField];
     if (typeof inline === 'string' && inline.length > 0) {
-      throw new Error(`Provide either '${fileField}' or 'file_path', not both.`);
+      throw new UploadRefusedError(`Provide either '${fileField}' or 'file_path', not both.`);
     }
 
     const bytes = await readGuardedUploadFile(filePath);
@@ -1261,6 +1305,104 @@ export class BookStackClient implements BookStackAPIClient {
     await this.request<void>({
       method: 'DELETE',
       url: `/image-gallery/${id}`,
+    });
+  }
+
+  // Comments API
+  async listComments(params?: CommentsListParams): Promise<ListResponse<Comment>> {
+    return this.request<ListResponse<Comment>>({
+      method: 'GET',
+      url: '/comments',
+      params,
+    });
+  }
+
+  async createComment(params: CreateCommentParams): Promise<Comment> {
+    return this.request<Comment>({
+      method: 'POST',
+      url: '/comments',
+      data: params,
+    });
+  }
+
+  async getComment(id: number): Promise<CommentDetail> {
+    return this.request<CommentDetail>({
+      method: 'GET',
+      url: `/comments/${id}`,
+    });
+  }
+
+  async updateComment(id: number, params: UpdateCommentParams): Promise<Comment> {
+    return this.request<Comment>({
+      method: 'PUT',
+      url: `/comments/${id}`,
+      data: params,
+    });
+  }
+
+  async deleteComment(id: number): Promise<void> {
+    await this.request<void>({
+      method: 'DELETE',
+      url: `/comments/${id}`,
+    });
+  }
+
+  // Imports API
+  async listImports(params?: ImportsListParams): Promise<ListResponse<Import>> {
+    return this.request<ListResponse<Import>>({
+      method: 'GET',
+      url: '/imports',
+      params,
+    });
+  }
+
+  /** BookStack requires the ZIP as a multipart `file` part, so this route is always multipart. */
+  async createImport(params: CreateImportParams): Promise<ImportCreateResult> {
+    const fields: UploadParams = {
+      file: params.file,
+      file_path: params.file_path,
+    };
+    await this.resolveLocalFile(fields, 'file');
+
+    return this.uploadFile<ImportCreateResult>('POST', '/imports', fields, 'file');
+  }
+
+  async getImport(id: number): Promise<ImportDetail> {
+    return this.request<ImportDetail>({
+      method: 'GET',
+      url: `/imports/${id}`,
+    });
+  }
+
+  async runImport(id: number, params: RunImportParams): Promise<ImportRunResult> {
+    return this.request<ImportRunResult>({
+      method: 'POST',
+      url: `/imports/${id}`,
+      data: params,
+    });
+  }
+
+  async deleteImport(id: number): Promise<void> {
+    await this.request<void>({
+      method: 'DELETE',
+      url: `/imports/${id}`,
+    });
+  }
+
+  // Tags API
+  async listTagNames(params?: TagNamesListParams): Promise<ListResponse<TagNameSummary>> {
+    return this.request<ListResponse<TagNameSummary>>({
+      method: 'GET',
+      url: '/tags/names',
+      params,
+    });
+  }
+
+  async listTagValues(params: TagValuesListParams): Promise<ListResponse<TagValueSummary>> {
+    return this.request<ListResponse<TagValueSummary>>({
+      method: 'GET',
+      url: '/tags/values-for-name',
+      params,
     });
   }
 

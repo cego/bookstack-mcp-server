@@ -1,6 +1,6 @@
 # BookStack MCP Server
 
-Connect BookStack to Claude and other AI assistants through the Model Context Protocol (MCP). This server exposes 59 tools, 5 resources and 6 resource templates covering the supported subset of the BookStack API — books, pages, chapters, shelves, search, users, roles, permissions, attachments, images, the recycle bin, the audit log and system info.
+Connect BookStack to Claude and other AI assistants through the Model Context Protocol (MCP). This server exposes 71 tools, 5 resources and 6 resource templates covering the supported subset of the BookStack API — books, pages, chapters, shelves, search, users, roles, permissions, attachments, images, comments, ZIP imports, tags, the recycle bin, the audit log and system info.
 
 This server supports two transport modes: **Streamable HTTP** (default) and **Stdio**.
 
@@ -10,15 +10,88 @@ This server supports two transport modes: **Streamable HTTP** (default) and **St
 > ⚠️ **Looking for the HTTP endpoint?** The MCP endpoint is `POST /message` — not `/`.
 > See [Transports](#-transports) and [HTTP endpoints](#http-endpoints) below.
 
+## 🍴 About this fork
+
+This is a fork of [pnocera/bookstack-mcp-server](https://github.com/pnocera/bookstack-mcp-server),
+maintained at [cego/bookstack-mcp-server](https://github.com/cego/bookstack-mcp-server). Its
+primary use is **per-user OAuth**: each person signs in to their AI assistant with your OIDC
+provider, and BookStack sees *their* account, permissions and audit trail instead of one shared
+API token.
+
+What the fork adds on top of upstream:
+
+- **Per-user OAuth** (`MCP_AUTH_MODE=oauth`): the HTTP transport is an OAuth resource server per
+  the MCP authorization spec. Access tokens must be issued for this server, and each one is
+  exchanged (RFC 8693) for a BookStack token, so the caller's own token is never forwarded.
+  See [Per-user OAuth](#per-user-oauth) for the full flow and requirements.
+- **More tools**: comments, ZIP imports, tags and ZIP export.
+- **Hardening** from a full security review: allowlisted upstream overrides, guarded and
+  size-limited uploads, linear-time page parsing, and no stack traces or paths in errors.
+- **Container images** instead of npm releases.
+
+### Run it with OAuth
+
+Images are published as `ghcr.io/cego/bookstack-mcp-server:<version>-r<revision>`, where
+`<version>` is the upstream version the fork builds on and `<revision>` counts the fork's
+releases of it. See [Releases](https://github.com/cego/bookstack-mcp-server/releases) for the
+current tag and digest, and pin the digest when you deploy.
+
+```bash
+# bookstack-mcp.env - keep it out of version control; it holds the client secret
+BOOKSTACK_BASE_URL=https://bookstack.example.com/api
+MCP_AUTH_MODE=oauth
+MCP_OAUTH_ISSUER=https://idp.example.com
+MCP_OAUTH_RESOURCE=https://bookstack-mcp.example.com/message
+MCP_OAUTH_CLIENT_ID=bookstack-mcp-server
+MCP_OAUTH_CLIENT_SECRET=<exchange client secret>
+BOOKSTACK_OAUTH_AUDIENCE=bookstack-api
+```
+
+```bash
+docker run -d --name bookstack-mcp -p 3000:3000 --env-file bookstack-mcp.env \
+  ghcr.io/cego/bookstack-mcp-server:<version>-r<revision>
+```
+
+Before it works end to end you need:
+
+1. **A BookStack that accepts OIDC access tokens on its API** (`OIDC_API_ACCESS_TOKENS=true`,
+   from [BookStack PR 6237](https://codeberg.org/bookstack/bookstack/pulls/6237)), with
+   `OIDC_API_AUDIENCE` set to `BOOKSTACK_OAUTH_AUDIENCE` and `OIDC_API_ALLOWED_CLIENTS` set to
+   `MCP_OAUTH_CLIENT_ID`. Users must have logged in to BookStack once.
+2. **Two OAuth clients at your provider**: one that users sign in with, whose access tokens carry
+   `MCP_OAUTH_RESOURCE` and `MCP_OAUTH_CLIENT_ID` (but not BookStack's audience) in `aud`, and
+   the confidential exchange client `MCP_OAUTH_CLIENT_ID`, held only by this server, allowed to
+   exchange those tokens for `BOOKSTACK_OAUTH_AUDIENCE`.
+3. **The server reachable at `MCP_OAUTH_RESOURCE`**, including
+   `/.well-known/oauth-protected-resource/message` on the same origin.
+
+Then connect your assistant with the **sign-in** client, never the exchange client:
+
+```bash
+# Claude Code
+claude mcp add --transport http --client-id <sign-in client id> --client-secret \
+  --callback-port <port> bookstack https://bookstack-mcp.example.com/message
+```
+
+For a Claude custom connector, use `https://bookstack-mcp.example.com/message` as the URL and
+the sign-in client's ID (and secret, if it is confidential) under *Advanced settings*.
+
+The rest of this README is upstream's documentation, kept current for this fork. The
+shared-token and stdio modes below still work.
+
 ## ✨ What You Get
 
 - **BookStack Integration** - Access your books, pages, chapters, and content
-- **59 MCP Tools, 5 Resources & 6 Resource Templates** - CRUD, search and export across the supported endpoint families
+- **71 MCP Tools, 5 Resources & 6 Resource Templates** - CRUD, search and export across the supported endpoint families
 - **Search & Export** - Find content and export in multiple formats
 - **User Management** - Handle users, roles, and permissions
 - **Production Ready** - Rate limiting, validation, error handling, and logging
 
 ## 🚀 Quick Start
+
+> ℹ️ `bunx`/`bun add` below install **upstream's** npm release, which lacks this fork's
+> changes. For the fork, use the container image ([Run it with OAuth](#run-it-with-oauth)) or
+> run from a clone (`bun install && bun run start`).
 
 > ⚠️ **Requires [Bun](https://bun.sh) 1.1.0 or newer. Node.js is not supported.**
 > This package ships TypeScript source rather than a compiled bundle, and its
@@ -44,7 +117,7 @@ bookstack-mcp-server
 
 The two tokens are **not** interchangeable and must not be set to the same value:
 `BOOKSTACK_API_TOKEN` is what the server presents to BookStack; `MCP_AUTH_TOKEN` is
-what callers must present to `POST /message`, which dispatches all 59 tools with the
+what callers must present to `POST /message`, which dispatches all 71 tools with the
 authority of the BookStack account behind `BOOKSTACK_API_TOKEN`. Skip `MCP_AUTH_TOKEN`
 only for [stdio](#-transports), which has no network surface and ignores it.
 
@@ -99,7 +172,7 @@ export MCP_TRANSPORT="http"
 | `BOOKSTACK_API_TOKEN` | _(none — required, unless `MCP_AUTH_MODE=oauth`)_ | **Outbound** BookStack API token as `token_id:token_secret`. This is the credential the server spends on every tool call. Startup fails if unset. |
 | `BOOKSTACK_TIMEOUT` | `30000` | BookStack request timeout in milliseconds. |
 | `BOOKSTACK_ALLOWED_BASE_URLS` | _(none)_ | Comma-separated BookStack API base URLs a caller may name in the `x-bookstack-url` header, compared canonically. Unset refuses that header. See [per-request overrides](#per-request-overrides). |
-| `BOOKSTACK_UPLOAD_ROOT` | _(none)_ | Directory the image/attachment tools' `file_path` may read from. Unset refuses `file_path` under every transport, stdio included; the path must resolve inside this directory. Must be unset with `MCP_AUTH_MODE=oauth`. |
+| `BOOKSTACK_UPLOAD_ROOT` | _(none)_ | Directory the image, attachment and import tools' `file_path` may read from. Unset refuses `file_path` under every transport, stdio included; the path must resolve inside this directory. Must be unset with `MCP_AUTH_MODE=oauth`. |
 | `SERVER_PORT` | `3000` | Port the HTTP transport listens on; if it is taken, startup fails with exit code `1`. Ignored in stdio mode. |
 | `HTTP_BODY_LIMIT` | `73400320` (70 MiB) | Maximum accepted `POST /message` body, in bytes. Sized for the largest inline base64 upload the image/attachment tools advertise (50,000 KB). Express's own default is ~100 KB, which would reject real uploads with a `413`. Lower it if untrusted callers can reach the port. |
 | `SERVER_NAME` | `bookstack-mcp-server` | Server name reported over MCP and by `GET /`. |
@@ -178,7 +251,7 @@ with the failing check named:
   "status": "unhealthy",
   "checks": [
     { "name": "bookstack_connection", "healthy": false, "message": "BookStack API connection" },
-    { "name": "tools_loaded", "healthy": true, "message": "59 tools loaded" },
+    { "name": "tools_loaded", "healthy": true, "message": "71 tools loaded" },
     { "name": "resources_loaded", "healthy": true, "message": "5 resources and 6 resource templates loaded" }
   ]
 }
@@ -301,9 +374,9 @@ MCP clients pipe over stdin/stdout. For stdio you also don't need `-p 3000:3000`
 
 ## 🛠️ Available Tools
 
-**59 tools across 13 categories:**
+**71 tools across 16 categories:**
 
-- **📚 Books** (6) - Create, read, update, delete, and export books
+- **📚 Books** (6) - Create, read, update, delete, and export books (html, pdf, plaintext, markdown, zip)
 - **📄 Pages** (9) - Manage pages with HTML/Markdown content, including [partial editing](#-partial-page-editing)
 - **📑 Chapters** (6) - Organize pages within books
 - **📚 Shelves** (5) - Group books into collections
@@ -315,10 +388,12 @@ MCP clients pipe over stdin/stdout. For stdio you also don't need `-p 3000:3000`
 - **🗑️ Recycle Bin** (3) - Deleted item recovery
 - **📎 Attachments** (5) - File attachments
 - **🖼️ Images** (5) - Image gallery
+- **💬 Comments** (5) - Page comments, replies and archiving
+- **📦 Imports** (5) - Upload and run BookStack ZIP imports
+- **🏷️ Tags** (2) - Tag names and values in use
 - **🧭 Meta** (5) - Ask the server about its own tools and conventions
 
-Not exposed (no tools): comments, imports, tag-name listings, the image-gallery
-`data` endpoints, and `zip` export.
+Not exposed (no tools): the image-gallery `data` endpoints.
 
 > 📖 See the complete [Tools Overview](docs/tools-overview.md) for detailed documentation
 
@@ -517,8 +592,9 @@ This project is part of the BookStack ecosystem! Check out other API-based tools
 ## 🆘 Support
 
 - **📚 Documentation**: Complete guides in the [docs/](docs/) folder
-- **🐛 Issues**: [GitHub Issues](https://github.com/pnocera/bookstack-mcp-server/issues)
-- **💬 Discussions**: [GitHub Discussions](https://github.com/pnocera/bookstack-mcp-server/discussions)
+- **🐛 Issues with this fork** (OAuth mode, images, fork-only tools): [cego/bookstack-mcp-server issues](https://github.com/cego/bookstack-mcp-server/issues)
+- **🐛 Upstream issues**: [pnocera/bookstack-mcp-server issues](https://github.com/pnocera/bookstack-mcp-server/issues)
+- **💬 Upstream discussions**: [GitHub Discussions](https://github.com/pnocera/bookstack-mcp-server/discussions)
 
 ---
 
